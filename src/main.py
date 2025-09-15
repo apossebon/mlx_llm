@@ -1,4 +1,4 @@
-from mlx_lm import load, generate, stream_generate 
+from mlx_lm import load, generate, stream_generate
 from mlx_lm.sample_utils import make_sampler, make_logits_processors
 from mlx_lm.models.cache import make_prompt_cache
 from datetime import datetime
@@ -35,15 +35,47 @@ namespace functions {
 """
 
 def getDataHora():
-    return {
-        "data_hora": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
-        "timezone": "America/Sao_Paulo"
-    }
+    """
+    Obtém a data e hora atual no fuso horário de São Paulo.
+    
+    Returns:
+        dict: Um dicionário contendo:
+            - data_hora (str): Data e hora atual no formato DD/MM/AAAA HH:MM:SS
+            
+    """
+
+    return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    # return {
+    #     "data_hora": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+    #     "timezone": datetime.now().strftime("%z")
+    # }
 
 # Dicionário de funções disponíveis
 available_functions = {
     "getDataHora": getDataHora
 }
+
+def detect_tool_call(text):
+    tool_open = "<tool_call>"
+    tool_close = "</tool_call>"
+    start_tool = text.find(tool_open) + len(tool_open)
+    end_tool = text.find(tool_close)
+
+    return start_tool != -1 and end_tool != -1
+
+def extract_tools_call(text)->tuple[dict, dict]:
+
+    tool_open = "<tool_call>"
+    tool_close = "</tool_call>"
+    start_tool = text.find(tool_open) + len(tool_open)
+    end_tool = text.find(tool_close)
+
+    if start_tool == -1 or end_tool == -1:
+        return None, None
+    
+    tool_call = json.loads(text[start_tool:end_tool].strip())
+    tool_result = available_functions[tool_call["name"]](**tool_call["arguments"])
+    return tool_result, tool_call 
 
 def detect_function_call(text):
     """
@@ -131,13 +163,6 @@ def create_harmony_conversation_with_tool_result(original_prompt, function_name,
         original_prompt
     )
     
-    # Criar mensagem de resposta da ferramenta no formato correto
-    # from openai_harmony import TextContent
-    # tool_content = TextContent(text=f"name:{function_name}, content:{result_json}")
-    # tool_message = Message.from_role_and_content(
-    #     Role.TOOL,
-    #     tool_content
-    # )
 
     # Criar mensagem de ferramenta corretamente
     tool_message = Message.from_author_and_content(
@@ -191,23 +216,18 @@ def main():
     print("Hello from mlx-llm!")
     DEFAULT_MODEL_ID = "mlx-community/gpt-oss-20b-MXFP4-Q8"
     Qwen_MODEL_ID = "lmstudio-community/Qwen3-30B-A3B-Instruct-2507-MLX-4bit"
+    Gemma_MODEL_ID = "mlx-community/gemma-3-27b-it-qat-4bit"
    
-    model, tokenizer = load(DEFAULT_MODEL_ID)
+    model, tokenizer = load(Qwen_MODEL_ID)
 
     _mlx_sampler = make_sampler(temp=0.7, top_p=0.85, top_k=40)
     _mlx_logits_processors = make_logits_processors(repetition_penalty=1.15, repetition_context_size=50)
     _mlx_prompt_cache = make_prompt_cache(model)
 
-    # prompt = "Conte uma história sobre a vida de Einstein"
 
-    # messages = [{"role": "user", "content": prompt}]
-   
-    # prompt_tokenized = tokenizer.apply_chat_template(
-    #     messages, add_generation_prompt=True
-    # )
 
     prompt = "Qual é a data e hora atual? Explique também como o tempo funciona."
-
+    b_harmony = False
 
     while True:
         prompt = input("Digite sua pergunta: ")
@@ -215,7 +235,14 @@ def main():
             break
         
         # Renderizar conversa Harmony inicial
-        prompt_harmony = render_harmony_conversation(prompt, functions_definition_example)
+        if b_harmony:
+            prompt_harmony = render_harmony_conversation(prompt, functions_definition_example)
+        else:
+            messages = [{"role": "user", "content": prompt}]
+   
+            prompt_harmony = tokenizer.apply_chat_template(
+                messages, add_generation_prompt=True, tools=list(available_functions.values())
+            )
         
         # Gerar resposta com interceptação de funções
         full_response = ""
@@ -231,45 +258,67 @@ def main():
             # print(response.token)
 
 
-            
+            if b_harmony:
             # Verificar se há chamada de função durante o streaming
-            if detect_function_call(full_response) and not function_called:
-                function_called = True
-                print("\n\n🔧 Detectada chamada de função durante o streaming!")
+                if detect_function_call(full_response) and not function_called:
+                    function_called = True
+                    print("\n\n🔧 Detectada chamada de função durante o streaming!")
+                    
+                    # Extrair informações da chamada
+                    function_call = extract_function_call(full_response)
+                    if function_call:
+                        print(f"Executando função: {function_call['function_name']}")
+                        
+                        # Executar função
+                        function_result = execute_function(function_call['function_name'], function_call['arguments'])
+                        print(f"Resultado: {function_result}")
+                        
+                        # Parar o streaming atual
+                        break
+                    else:
+                        print("⚠️ Não foi possível extrair informações da chamada de função")
+                        print(f"Texto detectado: {full_response[-200:]}")  # Últimos 200 caracteres
+            else:
+
                 
-                # Extrair informações da chamada
-                function_call = extract_function_call(full_response)
-                if function_call:
-                    print(f"Executando função: {function_call['function_name']}")
+
+                
+                if detect_tool_call(full_response):
+                    function_called = True
+                    resptools, tool_call = extract_tools_call(full_response)
+                    if resptools:
+                       
+                        function_result = resptools
+
                     
-                    # Executar função
-                    function_result = execute_function(function_call['function_name'], function_call['arguments'])
-                    print(f"Resultado: {function_result}")
                     
-                    # Parar o streaming atual
-                    break
-                else:
-                    print("⚠️ Não foi possível extrair informações da chamada de função")
-                    print(f"Texto detectado: {full_response[-200:]}")  # Últimos 200 caracteres
-        
+
         # Se uma função foi chamada, continuar com o resultado
         if function_called and function_result:
             print("\n\n🔄 Continuando com resultado da função...")
             
-            # Criar conversa Harmony com resultado da ferramenta
-            conversation_with_result = create_harmony_conversation_with_tool_result(
-                prompt, function_call['function_name'], function_result, functions_definition_example
-            )
-            
-            # Renderizar para tokens
-            result_tokens = encoding.render_conversation_for_completion(conversation_with_result, Role.ASSISTANT)
-            print(f"Tokens Harmony com resultado: {len(result_tokens)}")
-            
-            # Gerar resposta final
-            print("🤖 Resposta final:")
-            for response in stream_generate(model, tokenizer, result_tokens, max_tokens=1024, sampler=_mlx_sampler, logits_processors=_mlx_logits_processors, prompt_cache=_mlx_prompt_cache):
-                print(response.text, end="", flush=True)
-        
+            if b_harmony:
+                # Criar conversa Harmony com resultado da ferramenta
+                conversation_with_result = create_harmony_conversation_with_tool_result(
+                    prompt, function_call['function_name'], function_result, functions_definition_example
+                )
+                
+                # Renderizar para tokens
+                result_tokens = encoding.render_conversation_for_completion(conversation_with_result, Role.ASSISTANT)
+                print(f"Tokens Harmony com resultado: {len(result_tokens)}")
+                
+                # Gerar resposta final
+                print("🤖 Resposta final:")
+                for response in stream_generate(model, tokenizer, result_tokens, max_tokens=1024, sampler=_mlx_sampler, logits_processors=_mlx_logits_processors, prompt_cache=_mlx_prompt_cache):
+                    print(response.text, end="", flush=True)
+            else:
+                messages = [{"role": "tool", "name": tool_call["name"], "content": resptools}]
+                prompt = tokenizer.apply_chat_template(
+                    messages,
+                    add_generation_prompt=True,
+                )
+                for tool_response in stream_generate(model, tokenizer, prompt=prompt, max_tokens=1024, sampler=_mlx_sampler, logits_processors=_mlx_logits_processors, prompt_cache=_mlx_prompt_cache):
+                    print(tool_response.text, end="", flush=True)
         # print(full_response)
         print("\n\n" + "="*50 + "\n")
 
