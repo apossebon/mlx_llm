@@ -8,6 +8,7 @@ from chatmlx import ChatMLX
 from langchain.agents import create_agent
 import asyncio
 from message_utils import pretty_print_messages, print_conversation_summary
+from langgraph.checkpoint.memory import InMemorySaver
 
 @tool
 async def getDataHora():
@@ -33,22 +34,36 @@ async def main():
         model=myllm,
         tools=[getDataHora],
         prompt="You are a helpful assistant that can answer questions and use tools.",
+        checkpointer= InMemorySaver()
     )
 
+    config={"configurable": {"thread_id": "1"}}
+
     while True:
-        prompt = input("Digite sua pergunta: ")
+        prompt = input("\n\n\nDigite sua pergunta: ")
         if prompt == "exit":
             break
-        result = await agent.ainvoke({"messages": [HumanMessage(content=prompt)]})
-        print("\n📜 RESULTADO DO AGENT:")
-        pretty_print_messages(result)
-        print_conversation_summary(result)
+        
+        async for step, metadata in agent.astream({"messages": [HumanMessage(content=prompt)]}, config=config, stream_mode="messages"):
+            if metadata["langgraph_node"] == "agent" and (text := step.text()):
+                print(text, end="")
+                
+            elif metadata["langgraph_node"] == "tools" and (text := step.text()):
+                print("Chamada de Tools:")
+                print(text, end="")
+                print("\n")
+        
+        
+        # print("\n📜 RESULTADO DO AGENT:")
+        # pretty_print_messages(result)
+        # print_conversation_summary(result)
 
     
 
 
 if __name__ == "__main__":
     asyncio.run(main())
+    # main()
 
     # from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage 
     # from langchain_core.tools import tool

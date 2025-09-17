@@ -76,10 +76,12 @@ class ChatMLX(BaseChatModel):
         """
         print(f"🔍 Debug - model_name: {self.model_name}")
         try:
-            
-            # opcional: inicializar sampler/logits processors, se desejar
+            # sampler/logits processors (opcional)
             self._mlx_sampler = make_sampler(temp=self.temperature, top_p=self.top_p, top_k=self.top_k)
-            self._mlx_logits_processors = make_logits_processors(repetition_penalty=self.repetition_penalty, repetition_context_size=self.repetition_context_size)
+            self._mlx_logits_processors = make_logits_processors(
+                repetition_penalty=self.repetition_penalty,
+                repetition_context_size=self.repetition_context_size,
+            )
             self._model, self._tokenizer = load(self.model_name)
             return True
         except Exception as e:
@@ -123,7 +125,6 @@ class ChatMLX(BaseChatModel):
             content = f"Response from {self.model_name}: Hello from ChatMLX! (Error: {str(e)})"
             tool_calls = []
 
-
         if tool_calls:
             message = AIMessage(content=content, tool_calls=tool_calls)
         else:
@@ -140,13 +141,11 @@ class ChatMLX(BaseChatModel):
         **kwargs: Any,
     ) -> ChatResult:
         """
-        Async version of _generate - implementação assíncrona real.
+        Versão assíncrona real de _generate.
         """
-        # 1. Converter mensagens LangChain para formato da API
         api_messages = self._convert_messages(messages)
 
         try:
-            # 2. Chamada assíncrona para a API
             response = await self._acall_api(api_messages, stop, **kwargs)
             content = response.get("content", "Default async response from custom LLM")
             tool_calls = response.get("tool_calls", [])
@@ -154,15 +153,146 @@ class ChatMLX(BaseChatModel):
             content = f"Async response from {self.model_name}: Hello from ChatMLX! (Error: {str(e)})"
             tool_calls = []
 
-        # 3. Criar AIMessage com tool_calls se necessário
-        if tool_calls:
-            message = AIMessage(content=content, tool_calls=tool_calls)
-        else:
-            message = AIMessage(content=content)
-
+        message = AIMessage(content=content, tool_calls=tool_calls or None)
         generation = ChatGeneration(message=message)
         return ChatResult(generations=[generation])
 
+    # ---------- HELPERS DE STREAM ----------
+    def _iter_stream_tokens(self, prompt: str) -> Iterator[str]:
+        """
+        Itera tokens/trechos vindos do MLX de forma síncrona e normaliza para str.
+        Suporta múltiplos formatos de saída do stream_generate:
+        - str
+        - bytes
+        - objetos com .text e/ou .token
+        - dicts com 'text' e/ou 'token'
+        """
+        for piece in stream_generate(
+            self._model,
+            self._tokenizer,
+            prompt,
+            max_tokens=self.max_tokens,
+            sampler=self._mlx_sampler,
+            logits_processors=self._mlx_logits_processors,
+        ):
+            # 1) strings diretas
+            if isinstance(piece, str):
+                if piece:
+                    yield piece
+                continue
+
+            # 2) bytes
+            if isinstance(piece, (bytes, bytearray)):
+                s = piece.decode("utf-8", errors="ignore")
+                if s:
+                    yield s
+                continue
+
+            # 3) dict: pode ter 'text' e/ou 'token'
+            if isinstance(piece, dict):
+                s = ""
+                if "text" in piece and piece["text"]:
+                    s = str(piece["text"])
+                elif "token" in piece and piece["token"] is not None:
+                    try:
+                        s = self._tokenizer.decode([int(piece["token"])])
+                    except Exception:
+                        s = ""
+                if s:
+                    yield s
+                continue
+
+            # 4) objeto com atributos (ex.: GenerationResponse)
+            #    tenta .text; se vazio, tenta .token -> decode
+            text_attr = getattr(piece, "text", None)
+            if isinstance(text_attr, str) and text_attr:
+                yield text_attr
+                continue
+
+            token_attr = getattr(piece, "token", None)
+            if token_attr is not None:
+                try:
+                    s = self._tokenizer.decode([int(token_attr)])
+                    if s:
+                        yield s
+                except Exception:
+                    pass
+                continue
+
+            # 5) fallback: repr como último recurso (evita sumir com algo inesperado)
+            try:
+                s = str(piece)
+                if s:
+                    yield s
+            except Exception:
+                continue
+
+
+    # ---- dentro da classe ChatMLX ----
+
+    def _parse_stream_piece(
+        self,
+        scan_buffer: str,
+        piece: str,
+        in_tool: bool,
+        tool_buf: str,
+    ) -> tuple[str, bool, str, str, list]:
+        """
+        Parser incremental com buffer persistente de fronteira.
+        Retorna: clean_out, in_tool, tool_buf, scan_buffer, new_tools
+        """
+        scan_buffer += piece
+        clean_out = ""
+        new_tools = []
+
+        START = "<tool_call>"
+        END = "</tool_call>"
+
+        while True:
+            if in_tool:
+                end_idx = scan_buffer.find(END)
+                if end_idx == -1:
+                    tool_buf += scan_buffer
+                    scan_buffer = ""
+                    break
+                else:
+                    tool_content = tool_buf + scan_buffer[:end_idx]
+                    scan_buffer = scan_buffer[end_idx + len(END):]
+                    tool_buf = ""
+                    in_tool = False
+                    try:
+                        tool_data = json.loads(tool_content.strip())
+                        new_tools.append({
+                            "name": tool_data["name"],
+                            "args": tool_data.get("arguments", tool_data.get("args", {})),
+                            "id": f"call_{uuid.uuid4().hex[:8]}",
+                            "type": "tool_call",
+                        })
+                    except Exception:
+                        pass
+                    # continua; pode haver mais ferramentas na cauda
+            else:
+                start_idx = scan_buffer.find(START)
+                if start_idx == -1:
+                    # não achou START completo; preserve a cauda p/ fronteira
+                    keep = len(START) - 1  # 10 chars
+                    if len(scan_buffer) > keep:
+                        emit_upto = len(scan_buffer) - keep
+                        clean_out += scan_buffer[:emit_upto]
+                        scan_buffer = scan_buffer[emit_upto:]
+                    break
+                else:
+                    # achou START: tudo antes é texto normal
+                    clean_out += scan_buffer[:start_idx]
+                    # entra em modo tool; NÃO emita "<tool_call>"
+                    scan_buffer = scan_buffer[start_idx + len(START):]
+                    in_tool = True
+                    tool_buf = ""
+                    # volta ao loop para procurar o END
+
+        return clean_out, in_tool, tool_buf, scan_buffer, new_tools
+
+    # ---------- STREAM SÍNCRONO ----------
     def _stream(
         self,
         messages: List[BaseMessage],
@@ -171,35 +301,82 @@ class ChatMLX(BaseChatModel):
         **kwargs: Any,
     ) -> Iterator[ChatGenerationChunk]:
         """
-        Stream de resposta em chunks.
+        Streaming síncrono: emite AIMessageChunk com texto incremental.
+        No final, anexa quaisquer tool_calls detectados ao último chunk.
         """
-        api_messages = self._convert_messages(messages)
+        try:
+            self._ensure_loaded()
+            api_messages = self._convert_messages(messages)
+            prompt = self._tokenizer.apply_chat_template(
+                api_messages, add_generation_prompt=True, tools=self.bound_tools
+            )
+        except Exception as e:
+            yield ChatGenerationChunk(message=AIMessageChunk(content=f"[stream init error] {e}"))
+            return
+
+        # estados do parser de tool_call
+        in_tool = False
+        tool_buf = ""
+        scan_buffer = ""        # <-- NOVO: persistente entre chunks
+        collected_tools = []
+        stop = stop or []
+        cumulative_text = ""
+
+        def apply_stop(new_text: str) -> tuple[str, bool]:
+            if not stop:
+                return new_text, False
+            probe = cumulative_text + new_text
+            first_hit_idx = None
+            for s in stop:
+                idx = probe.find(s)
+                if idx != -1 and (first_hit_idx is None or idx < first_hit_idx):
+                    first_hit_idx = idx
+            if first_hit_idx is None:
+                return new_text, False
+            emit_len = max(0, first_hit_idx - len(cumulative_text))
+            return new_text[:emit_len], True
 
         try:
-            response_text, tool_calls = self._simulate_streaming_response(api_messages, stop, **kwargs)
+            for raw_piece in self._iter_stream_tokens(prompt):
+                # 1) PARSE ANTES DE TUDO
+                clean_piece, in_tool, tool_buf, scan_buffer, new_tools = self._parse_stream_piece(
+                    scan_buffer=scan_buffer,
+                    piece=raw_piece,
+                    in_tool=in_tool,
+                    tool_buf=tool_buf,
+                )
+                if new_tools:
+                    collected_tools.extend(new_tools)
 
-            for chunk_text, is_final in self._create_text_chunks(response_text):
-                if is_final and tool_calls:
-                    chunk = AIMessageChunk(
-                        content=chunk_text,
-                        tool_calls=[self._convert_tool_call(tc) for tc in tool_calls],
-                    )
-                else:
-                    chunk = AIMessageChunk(content=chunk_text)
+                # 2) STOP
+                to_emit, should_stop = apply_stop(clean_piece)
 
-                generation_chunk = ChatGenerationChunk(message=chunk)
+                # 3) EMITIR
+                if to_emit:
+                    cumulative_text += to_emit
+                    chunk = AIMessageChunk(content=to_emit)
+                    if run_manager:
+                        try:
+                            run_manager.on_llm_new_token(to_emit)
+                        except Exception:
+                            pass
+                    yield ChatGenerationChunk(message=chunk)
 
-                if run_manager:
-                    run_manager.on_llm_new_token(chunk_text)
+                if should_stop:
+                    break
 
-                yield generation_chunk
-                time.sleep(0.05)
+            # Se sobrou algo no scan_buffer e não estamos dentro de tool, descarte (é cauda parcial)
+            if scan_buffer and not in_tool:
+                scan_buffer = ""
+
+            # Emite chunk final só com tool_calls (se houver)
+            if collected_tools:
+                yield ChatGenerationChunk(message=AIMessageChunk(content="", tool_calls=collected_tools))
 
         except Exception as e:
-            error_message = f"Streaming error from {self.model_name}: ChatMLX! (Error: {str(e)})"
-            chunk = AIMessageChunk(content=error_message)
-            yield ChatGenerationChunk(message=chunk)
+            yield ChatGenerationChunk(message=AIMessageChunk(content=f"[stream error] {e}"))
 
+    # ---------- STREAM ASSÍNCRONO ----------
     async def _astream(
         self,
         messages: List[BaseMessage],
@@ -208,34 +385,117 @@ class ChatMLX(BaseChatModel):
         **kwargs: Any,
     ) -> AsyncIterator[ChatGenerationChunk]:
         """
-        Stream assíncrono.
+        Streaming assíncrono: consome o gerador síncrono em executor sem bloquear o event loop.
+        - Mantém scan_buffer persistente (fronteira de <tool_call>)
+        - Detecta e agrega tool_calls no chunk final
+        - Respeita stop sequences
+        - Emite on_llm_new_token
         """
-        api_messages = self._convert_messages(messages)
-
+        # 1) Preparação
         try:
-            response_text, tool_calls = self._simulate_streaming_response(api_messages, stop, **kwargs)
+            self._ensure_loaded()
+            api_messages = self._convert_messages(messages)
+            prompt = self._tokenizer.apply_chat_template(
+                api_messages, add_generation_prompt=True, tools=self.bound_tools
+            )
+        except Exception as e:
+            yield ChatGenerationChunk(message=AIMessageChunk(content=f"[stream init error] {e}"))
+            return
 
-            for chunk_text, is_final in self._create_text_chunks(response_text):
-                if is_final and tool_calls:
-                    chunk = AIMessageChunk(
-                        content=chunk_text,
-                        tool_calls=[self._convert_tool_call(tc) for tc in tool_calls],
-                    )
-                else:
-                    chunk = AIMessageChunk(content=chunk_text)
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue(maxsize=256)
 
-                generation_chunk = ChatGenerationChunk(message=chunk)
+        def producer():
+            try:
+                for p in self._iter_stream_tokens(prompt):
+                    loop.call_soon_threadsafe(queue.put_nowait, p)
+            except Exception as ex:
+                loop.call_soon_threadsafe(queue.put_nowait, {"__err__": str(ex)})
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, {"__eos__": True})
 
-                if run_manager:
-                    await run_manager.on_llm_new_token(chunk_text)
+        prod_fut = loop.run_in_executor(None, producer)
 
-                yield generation_chunk
-                await asyncio.sleep(0.05)
+        # 2) Estados do parser / stop
+        in_tool = False
+        tool_buf = ""
+        scan_buffer = ""              # <--- persistente entre chunks!
+        collected_tools: list = []
+        stop = stop or []
+        cumulative_text = ""
+
+        async def apply_stop_async(new_text: str) -> tuple[str, bool]:
+            if not stop:
+                return new_text, False
+            probe = cumulative_text + new_text
+            first_hit_idx = None
+            for s in stop:
+                idx = probe.find(s)
+                if idx != -1 and (first_hit_idx is None or idx < first_hit_idx):
+                    first_hit_idx = idx
+            if first_hit_idx is None:
+                return new_text, False
+            emit_len = max(0, first_hit_idx - len(cumulative_text))
+            return new_text[:emit_len], True
+
+        # 3) Consumo do stream
+        try:
+            while True:
+                item = await queue.get()
+
+                if isinstance(item, dict) and item.get("__eos__"):
+                    break
+                if isinstance(item, dict) and "__err__" in item:
+                    yield ChatGenerationChunk(message=AIMessageChunk(content=f"[stream error] {item['__err__']}"))
+                    return
+
+                raw_piece = item  # string normalizada por _iter_stream_tokens
+                # >>> usar scan_buffer persistente E o nome certo do argumento <<<
+                clean_piece, in_tool, tool_buf, scan_buffer, new_tools = self._parse_stream_piece(
+                    scan_buffer=scan_buffer,
+                    piece=raw_piece,
+                    in_tool=in_tool,
+                    tool_buf=tool_buf,
+                )
+                if new_tools:
+                    collected_tools.extend(new_tools)
+
+                to_emit, should_stop = await apply_stop_async(clean_piece)
+                if to_emit:
+                    cumulative_text += to_emit
+                    chunk = AIMessageChunk(content=to_emit)
+                    if run_manager:
+                        try:
+                            await run_manager.on_llm_new_token(to_emit)
+                        except Exception:
+                            pass
+                    yield ChatGenerationChunk(message=chunk)
+
+                if should_stop:
+                    # drena a fila até EOS para encerrar ordenadamente
+                    while True:
+                        itm = await queue.get()
+                        if isinstance(itm, dict) and itm.get("__eos__"):
+                            break
+                    break
+
+            # Se sobrou algo no scan_buffer e não estamos em tool, descarte (cauda parcial)
+            if scan_buffer and not in_tool:
+                scan_buffer = ""
+
+            # Emite chunk final só com tool_calls (se houver)
+            if collected_tools:
+                yield ChatGenerationChunk(message=AIMessageChunk(content="", tool_calls=collected_tools))
+
+            # garante encerramento do produtor
+            try:
+                await prod_fut
+            except Exception:
+                pass
 
         except Exception as e:
-            error_message = f"Async streaming error from {self.model_name}: ChatMLX! (Error: {str(e)})"
-            chunk = AIMessageChunk(content=error_message)
-            yield ChatGenerationChunk(message=chunk)
+            yield ChatGenerationChunk(message=AIMessageChunk(content=f"[astream error] {e}"))
+
 
     # --------------------------------
     # Conversões / utilidades
@@ -254,10 +514,8 @@ class ChatMLX(BaseChatModel):
         """
         Chamada real ao modelo MLX (generate).
         """
-        # Garante que _model/_tokenizer existem
         self._ensure_loaded()
 
-        # Monta o prompt via tokenizer
         try:
             prompt = self._tokenizer.apply_chat_template(
                 messages,
@@ -277,15 +535,7 @@ class ChatMLX(BaseChatModel):
             logits_processors=self._mlx_logits_processors,
         )
 
-        # Detectar tool calls reais na resposta
         detected_tool_calls = self._detect_real_tool_calls(response)
-
-        print(f"🔍 Debug _call_api:")
-        print(f"   Resposta do modelo: {response[:100]}...")
-        print(f"   Tool calls detectados: {len(detected_tool_calls)}")
-        if detected_tool_calls:
-            for i, tc in enumerate(detected_tool_calls):
-                print(f"   Tool Call {i+1}: {type(tc)} - {tc}")
 
         if detected_tool_calls:
             return {"content": "", "tool_calls": detected_tool_calls}
@@ -297,11 +547,9 @@ class ChatMLX(BaseChatModel):
         Versão assíncrona de _call_api - chamada assíncrona ao modelo MLX.
         """
         import asyncio
-        
-        # Garante que _model/_tokenizer existem
+
         self._ensure_loaded()
 
-        # Monta o prompt via tokenizer
         try:
             prompt = self._tokenizer.apply_chat_template(
                 messages,
@@ -312,8 +560,6 @@ class ChatMLX(BaseChatModel):
             print(f"🔍 Async Error - {e}")
             return {"content": f"Async Error: {str(e)}", "tool_calls": []}
 
-        # Executar generate de forma assíncrona usando asyncio.to_thread
-        # para não bloquear o event loop
         try:
             response = await asyncio.to_thread(
                 generate,
@@ -328,15 +574,7 @@ class ChatMLX(BaseChatModel):
             print(f"🔍 Async Generate Error - {e}")
             return {"content": f"Async Generate Error: {str(e)}", "tool_calls": []}
 
-        # Detectar tool calls reais na resposta
         detected_tool_calls = self._detect_real_tool_calls(response)
-
-        print(f"🔍 Debug _acall_api (async):")
-        print(f"   Resposta do modelo: {response[:100]}...")
-        print(f"   Tool calls detectados: {len(detected_tool_calls)}")
-        if detected_tool_calls:
-            for i, tc in enumerate(detected_tool_calls):
-                print(f"   Tool Call {i+1}: {type(tc)} - {tc}")
 
         if detected_tool_calls:
             return {"content": "", "tool_calls": detected_tool_calls}
@@ -371,136 +609,14 @@ class ChatMLX(BaseChatModel):
                 if hasattr(tool, "__name__"):
                     tool_functions[tool.__name__] = tool
 
-        # Mutar a própria instância — não criar outra
         self.bound_tools = formatted_tools
         self.tool_choice = kwargs.get("tool_choice", self.tool_choice)
         self._tool_functions = tool_functions
         return self
 
-    def _convert_tool_call(self, tool_call: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Caso precise adaptar o formato de tool_call para o AIMessageChunk final.
-        Aqui apenas devolvemos o que já está em dict.
-        """
-        return tool_call
-
-    def _simulate_tool_calls(self, messages: List[BaseMessage], content: str) -> List[Dict]:
-        """
-        Simula tool calls para demonstração.
-        """
-        if not self.bound_tools:
-            return []
-
-        # Evitar loop de tool calls
-        recent_tool_calls = 0
-        for msg in messages[-5:]:
-            if hasattr(msg, "tool_calls") and msg.tool_calls:
-                recent_tool_calls += len(msg.tool_calls)
-        if recent_tool_calls >= 2:
-            return []
-
-        last_message = messages[-1] if messages else None
-        if not last_message or not hasattr(last_message, "content"):
-            return []
-        if hasattr(last_message, "type") and last_message.type == "tool":
-            return []
-
-        user_content = str(last_message.content).lower()
-
-        tool_keywords = {
-            "get_weather": ["weather", "temperature", "climate", "forecast"],
-            "search_web": ["search", "find", "information", "look up"],
-            "calculate": ["calculate", "math", "compute", "*", "+", "-", "/", "="],
-        }
-
-        for tool in self.bound_tools:
-            tool_name = tool.get("function", {}).get("name", "")
-            keywords = tool_keywords.get(tool_name, [])
-            if any(keyword in user_content for keyword in keywords):
-                args = self._generate_tool_args(tool_name, user_content)
-                tool_call = {
-                    "name": tool_name,
-                    "args": args,
-                    "id": f"call_{uuid.uuid4().hex[:8]}",
-                    "type": "tool_call",
-                }
-                return [tool_call]
-
-        return []
-
-    def _generate_tool_args(self, tool_name: str, user_content: str) -> Dict[str, Any]:
-        """Gera argumentos de exemplo para cada ferramenta."""
-        if tool_name == "get_weather":
-            words = user_content.split()
-            location = "San Francisco"
-            location_indicators = ["in", "at", "for", "from"]
-            for i, word in enumerate(words):
-                if word.lower() in location_indicators and i + 1 < len(words):
-                    next_word = words[i + 1].replace("?", "").replace(",", "").title()
-                    if len(next_word) > 1:
-                        location = next_word
-                        break
-            cities = ["paris", "london", "tokyo", "new york", "berlin", "madrid", "rome"]
-            for city in cities:
-                if city in user_content.lower():
-                    location = city.title()
-                    break
-            return {"location": location}
-
-        elif tool_name == "search_web":
-            return {"query": user_content}
-
-        elif tool_name == "calculate":
-            math_expr = re.search(r"[\d\s+\-*/()]+", user_content)
-            if math_expr:
-                return {"expression": math_expr.group().strip()}
-            return {"expression": "2 + 2"}
-
-        return {"query": user_content}
 
     # --------------------------------
-    # Streaming simulado
-    # --------------------------------
-    def _simulate_streaming_response(
-        self, messages: List[Dict], stop: Optional[List[str]] = None, **kwargs
-    ) -> tuple[str, List[Dict[str, Any]]]:
-        last_message = messages[-1] if messages else {}
-        user_content = last_message.get("content", "").lower()
-
-        if "weather" in user_content:
-            response_text = "I'll check the weather for you. Let me use the weather tool to get the current conditions."
-        elif "search" in user_content or "find" in user_content:
-            response_text = "I'll search for that information. Let me use the search tool to find relevant results."
-        elif any(op in user_content for op in ["*", "+", "-", "/", "calculate"]):
-            response_text = "I'll calculate that for you. Let me use the calculator tool to compute the result."
-        else:
-            response_text = (
-                f"Hello! This is a streaming response from {self.model_name}. "
-                f"I'm processing your request step by step."
-            )
-
-        tool_calls = []
-        if self.bound_tools:
-            tool_calls = self._simulate_tool_calls(
-                [type("MockMessage", (), {"content": user_content, "type": "human"})()], response_text
-            )
-
-        return response_text, tool_calls
-
-    def _create_text_chunks(self, text: str) -> Iterator[tuple[str, bool]]:
-        if not text:
-            yield ("", True)
-            return
-        words = text.split()
-        for i, word in enumerate(words):
-            is_final = i == len(words) - 1
-            chunk_text = word if i == 0 else " " + word
-            yield (chunk_text, is_final)
-        if not words:
-            yield (text, True)
-
-    # --------------------------------
-    # Detecção de tool calls reais (no texto)
+    # Detecção de tool calls no texto completo (fallback)
     # --------------------------------
     def _detect_real_tool_calls(self, response: str) -> List[Dict]:
         tool_calls = []
@@ -520,6 +636,7 @@ class ChatMLX(BaseChatModel):
             except json.JSONDecodeError:
                 continue
         return tool_calls
+
 
 
 
