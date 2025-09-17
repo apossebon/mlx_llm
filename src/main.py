@@ -1,9 +1,10 @@
 from mlx_lm import load, generate, stream_generate
 from mlx_lm.sample_utils import make_sampler, make_logits_processors
-from mlx_lm.models.cache import make_prompt_cache
+from mlx_lm.models.cache import make_prompt_cache, save_prompt_cache, load_prompt_cache
 from datetime import datetime
 import re
 import json
+import asyncio
 
 from openai_harmony import (
     load_harmony_encoding,
@@ -212,7 +213,7 @@ def render_harmony_conversation(usermessage: str, functions_definition: str):
 
 
 
-def main():
+async def main():
     print("Hello from mlx-llm!")
     DEFAULT_MODEL_ID = "mlx-community/gpt-oss-20b-MXFP4-Q8"
     Qwen_MODEL_ID = "lmstudio-community/Qwen3-30B-A3B-Instruct-2507-MLX-4bit"
@@ -326,4 +327,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
