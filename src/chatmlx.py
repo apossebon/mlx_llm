@@ -4,7 +4,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult, ChatGenerationChu
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
-from typing import List, Optional, Any, Dict, Union, Sequence, Iterator, AsyncIterator
+from typing import List, Optional, Any, Dict, Union, Sequence, Iterator, AsyncIterator, ClassVar
 import os
 import requests
 import json
@@ -14,7 +14,7 @@ import time
 import re
 
 # Pydantic (para atributos privados de runtime)
-from pydantic import PrivateAttr
+from pydantic import PrivateAttr, Field
 
 ### MLX imports
 from mlx_lm.sample_utils import make_sampler, make_logits_processors
@@ -26,20 +26,22 @@ Qwen_MODEL_ID = "lmstudio-community/Qwen3-30B-A3B-Instruct-2507-MLX-4bit"
 
 class ChatMLX(BaseChatModel):
     """
-    Exemplo de LLM customizado seguindo o padrão LangChain.
+    LLM customizado compatível com LangChain + MLX.
 
-    Funcionalidades incluídas:
-    ✅ Chat completions básicas
-    ✅ Suporte a bind_tools()
-    ✅ Tool calling com formato LangChain
-    ✅ Compatibilidade com agentes
-    ✅ Conversão automática de ferramentas
-    ✅ Simulação de tool calls para demonstração
-    ✅ Streaming síncrono (_stream)
-    ✅ Streaming assíncrono (_astream)
-    ✅ AIMessageChunk com chunks progressivos
-    ✅ Callbacks para tokens em tempo real
+    Funcionalidades:
+    - Completions sync/async
+    - Streaming sync/async
+    - bind_tools() sem recriar instância
+    - Detecção de tool calls via <tool_call>{...}</tool_call> (stream e não-stream)
+    - Otimizações de performance (batch decode, stop window, buffers)
     """
+
+    # -----------------------------
+    # Constantes / Regex pré-compilado
+    # -----------------------------
+    START_TAG: ClassVar[str] = "<tool_call>"
+    END_TAG: ClassVar[str] = "</tool_call>"
+    _tool_re: ClassVar[re.Pattern] = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
 
     # -----------------------------
     # Campos "declarativos" (pydantic)
@@ -47,19 +49,19 @@ class ChatMLX(BaseChatModel):
     model_name: Optional[str] = Qwen_MODEL_ID
     api_key: Optional[str] = None
     temperature: float = 0.7
-    max_tokens: int = 1024
+    max_tokens: int = 4096
     top_p: float = 0.85
     top_k: int = 40
     repetition_penalty: float = 1.15
     repetition_context_size: int = 50
+    use_gpt_harmony_response_format: bool = False  # futuro
 
-    # Propriedades para suporte a ferramentas (parte do "modelo")
-    bound_tools: List[Dict[str, Any]] = []
+    # Evita estado compartilhado entre instâncias
+    bound_tools: List[Dict[str, Any]] = Field(default_factory=list)
     tool_choice: Optional[Union[str, Dict[str, Any]]] = None
 
     # -----------------------------
     # Atributos privados (runtime)
-    # NÃO entram em validação/serialização do Pydantic
     # -----------------------------
     _model: Any = PrivateAttr(default=None)
     _tokenizer: Any = PrivateAttr(default=None)
@@ -71,12 +73,9 @@ class ChatMLX(BaseChatModel):
     # Inicialização / carregamento
     # --------------------------------
     def init(self) -> bool:
-        """
-        Initialize the model and tokenizer (runtime).
-        """
+        """Initialize the model and tokenizer (runtime)."""
         print(f"🔍 Debug - model_name: {self.model_name}")
         try:
-            # sampler/logits processors (opcional)
             self._mlx_sampler = make_sampler(temp=self.temperature, top_p=self.top_p, top_k=self.top_k)
             self._mlx_logits_processors = make_logits_processors(
                 repetition_penalty=self.repetition_penalty,
@@ -89,9 +88,7 @@ class ChatMLX(BaseChatModel):
             return False
 
     def _ensure_loaded(self):
-        """
-        Garante que _model e _tokenizer estejam carregados no runtime.
-        """
+        """Garante que _model e _tokenizer estejam carregados no runtime."""
         if self._model is None or self._tokenizer is None:
             ok = self.init()
             if not ok:
@@ -99,7 +96,6 @@ class ChatMLX(BaseChatModel):
 
     @property
     def _llm_type(self) -> str:
-        """Return identifier of the LLM."""
         return "ChatMLX"
 
     # --------------------------------
@@ -112,24 +108,15 @@ class ChatMLX(BaseChatModel):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> ChatResult:
-        """
-        Generate chat completion seguindo o padrão LangChain.
-        """
         api_messages = self._convert_messages(messages)
-
         try:
-            response = self._call_api(api_messages, stop, **kwargs)
+            response = self._call_generate_mlx_lm(api_messages, stop, **kwargs)
             content = response.get("content", "Default response from custom LLM")
             tool_calls = response.get("tool_calls", [])
         except Exception as e:
             content = f"Response from {self.model_name}: Hello from ChatMLX! (Error: {str(e)})"
             tool_calls = []
-
-        if tool_calls:
-            message = AIMessage(content=content, tool_calls=tool_calls)
-        else:
-            message = AIMessage(content=content)
-
+        message = AIMessage(content=content, tool_calls=tool_calls or None)
         generation = ChatGeneration(message=message)
         return ChatResult(generations=[generation])
 
@@ -140,19 +127,14 @@ class ChatMLX(BaseChatModel):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> ChatResult:
-        """
-        Versão assíncrona real de _generate.
-        """
         api_messages = self._convert_messages(messages)
-
         try:
-            response = await self._acall_api(api_messages, stop, **kwargs)
+            response = await self._acall_generate_mlx_lm(api_messages, stop, **kwargs)
             content = response.get("content", "Default async response from custom LLM")
             tool_calls = response.get("tool_calls", [])
         except Exception as e:
             content = f"Async response from {self.model_name}: Hello from ChatMLX! (Error: {str(e)})"
             tool_calls = []
-
         message = AIMessage(content=content, tool_calls=tool_calls or None)
         generation = ChatGeneration(message=message)
         return ChatResult(generations=[generation])
@@ -160,13 +142,20 @@ class ChatMLX(BaseChatModel):
     # ---------- HELPERS DE STREAM ----------
     def _iter_stream_tokens(self, prompt: str) -> Iterator[str]:
         """
-        Itera tokens/trechos vindos do MLX de forma síncrona e normaliza para str.
-        Suporta múltiplos formatos de saída do stream_generate:
-        - str
-        - bytes
-        - objetos com .text e/ou .token
-        - dicts com 'text' e/ou 'token'
+        Itera saídas do MLX e normaliza para str.
+        Otimização: decodifica tokens em lote para reduzir overhead.
         """
+        token_buf: List[int] = []
+
+        def flush_tokens():
+            if token_buf:
+                try:
+                    text = self._tokenizer.decode(token_buf)
+                    if text:
+                        yield text
+                finally:
+                    token_buf.clear()
+
         for piece in stream_generate(
             self._model,
             self._tokenizer,
@@ -177,88 +166,89 @@ class ChatMLX(BaseChatModel):
         ):
             # 1) strings diretas
             if isinstance(piece, str):
+                yield from flush_tokens()
                 if piece:
                     yield piece
                 continue
 
             # 2) bytes
             if isinstance(piece, (bytes, bytearray)):
+                yield from flush_tokens()
                 s = piece.decode("utf-8", errors="ignore")
                 if s:
                     yield s
                 continue
 
-            # 3) dict: pode ter 'text' e/ou 'token'
+            # 3) dict: 'text' e/ou 'token'
             if isinstance(piece, dict):
-                s = ""
                 if "text" in piece and piece["text"]:
+                    yield from flush_tokens()
                     s = str(piece["text"])
+                    if s:
+                        yield s
                 elif "token" in piece and piece["token"] is not None:
                     try:
-                        s = self._tokenizer.decode([int(piece["token"])])
+                        token_buf.append(int(piece["token"]))
                     except Exception:
-                        s = ""
-                if s:
-                    yield s
+                        pass
                 continue
 
             # 4) objeto com atributos (ex.: GenerationResponse)
-            #    tenta .text; se vazio, tenta .token -> decode
             text_attr = getattr(piece, "text", None)
             if isinstance(text_attr, str) and text_attr:
+                yield from flush_tokens()
                 yield text_attr
                 continue
 
             token_attr = getattr(piece, "token", None)
             if token_attr is not None:
                 try:
-                    s = self._tokenizer.decode([int(token_attr)])
-                    if s:
-                        yield s
+                    token_buf.append(int(token_attr))
                 except Exception:
                     pass
                 continue
 
-            # 5) fallback: repr como último recurso (evita sumir com algo inesperado)
+            # 5) fallback
             try:
                 s = str(piece)
                 if s:
+                    yield from flush_tokens()
                     yield s
             except Exception:
                 continue
 
-
-    # ---- dentro da classe ChatMLX ----
+        # flush final
+        yield from flush_tokens()
 
     def _parse_stream_piece(
         self,
         scan_buffer: str,
         piece: str,
         in_tool: bool,
-        tool_buf: str,
-    ) -> tuple[str, bool, str, str, list]:
+        tool_buf_parts: List[str],
+    ) -> tuple[str, bool, str, str, List[Dict[str, Any]]]:
         """
-        Parser incremental com buffer persistente de fronteira.
-        Retorna: clean_out, in_tool, tool_buf, scan_buffer, new_tools
+        Parser incremental com buffer persistente de fronteira e buffer de partes para tool.
+        Retorna: clean_out, in_tool, scan_buffer, (tool_buf_parts mutado), new_tools
         """
         scan_buffer += piece
         clean_out = ""
-        new_tools = []
+        new_tools: List[Dict[str, Any]] = []
 
-        START = "<tool_call>"
-        END = "</tool_call>"
+        START = self.START_TAG
+        END = self.END_TAG
 
         while True:
             if in_tool:
                 end_idx = scan_buffer.find(END)
                 if end_idx == -1:
-                    tool_buf += scan_buffer
+                    tool_buf_parts.append(scan_buffer)
                     scan_buffer = ""
                     break
                 else:
-                    tool_content = tool_buf + scan_buffer[:end_idx]
+                    tool_content = "".join(tool_buf_parts) + scan_buffer[:end_idx]
                     scan_buffer = scan_buffer[end_idx + len(END):]
-                    tool_buf = ""
+                    tool_buf_parts.clear()
                     in_tool = False
                     try:
                         tool_data = json.loads(tool_content.strip())
@@ -270,11 +260,11 @@ class ChatMLX(BaseChatModel):
                         })
                     except Exception:
                         pass
-                    # continua; pode haver mais ferramentas na cauda
+                    # continua; pode haver mais um START logo após o END
             else:
                 start_idx = scan_buffer.find(START)
                 if start_idx == -1:
-                    # não achou START completo; preserve a cauda p/ fronteira
+                    # não achou START completo; preserve cauda para fronteira
                     keep = len(START) - 1  # 10 chars
                     if len(scan_buffer) > keep:
                         emit_upto = len(scan_buffer) - keep
@@ -282,15 +272,42 @@ class ChatMLX(BaseChatModel):
                         scan_buffer = scan_buffer[emit_upto:]
                     break
                 else:
-                    # achou START: tudo antes é texto normal
+                    # emite o texto antes do START e entra em modo tool
                     clean_out += scan_buffer[:start_idx]
-                    # entra em modo tool; NÃO emita "<tool_call>"
                     scan_buffer = scan_buffer[start_idx + len(START):]
                     in_tool = True
-                    tool_buf = ""
-                    # volta ao loop para procurar o END
+                    tool_buf_parts.clear()
+                    # volta ao loop para procurar END
 
-        return clean_out, in_tool, tool_buf, scan_buffer, new_tools
+        return clean_out, in_tool, scan_buffer, new_tools
+
+    def _make_stop_checker(self, stop: List[str]):
+        """Cria verificador de stop por janela deslizante (sem concatenar tudo)."""
+        if not stop:
+            return lambda new_text, tail: (new_text, False, tail)
+
+        max_len = max(len(s) for s in stop)
+        stop_tuple = tuple(stop)
+
+        def check(new_text: str, window_tail: str) -> tuple[str, bool, str]:
+            if not new_text:
+                return "", False, window_tail
+            probe = window_tail + new_text
+            first_hit_idx = None
+            first_hit_len = 0
+            for s in stop_tuple:
+                idx = probe.find(s)
+                if idx != -1 and (first_hit_idx is None or idx < first_hit_idx):
+                    first_hit_idx = idx
+                    first_hit_len = len(s)
+            if first_hit_idx is None:
+                new_tail_len = max_len - 1
+                new_tail = probe[-new_tail_len:] if new_tail_len > 0 and len(probe) > new_tail_len else probe
+                return new_text, False, new_tail
+            emit_len = max(0, first_hit_idx - len(window_tail))
+            to_emit = new_text[:emit_len]
+            return to_emit, True, ""  # paramos após emitir até antes do stop
+        return check
 
     # ---------- STREAM SÍNCRONO ----------
     def _stream(
@@ -300,10 +317,6 @@ class ChatMLX(BaseChatModel):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> Iterator[ChatGenerationChunk]:
-        """
-        Streaming síncrono: emite AIMessageChunk com texto incremental.
-        No final, anexa quaisquer tool_calls detectados ao último chunk.
-        """
         try:
             self._ensure_loaded()
             api_messages = self._convert_messages(messages)
@@ -314,46 +327,26 @@ class ChatMLX(BaseChatModel):
             yield ChatGenerationChunk(message=AIMessageChunk(content=f"[stream init error] {e}"))
             return
 
-        # estados do parser de tool_call
         in_tool = False
-        tool_buf = ""
-        scan_buffer = ""        # <-- NOVO: persistente entre chunks
-        collected_tools = []
-        stop = stop or []
-        cumulative_text = ""
-
-        def apply_stop(new_text: str) -> tuple[str, bool]:
-            if not stop:
-                return new_text, False
-            probe = cumulative_text + new_text
-            first_hit_idx = None
-            for s in stop:
-                idx = probe.find(s)
-                if idx != -1 and (first_hit_idx is None or idx < first_hit_idx):
-                    first_hit_idx = idx
-            if first_hit_idx is None:
-                return new_text, False
-            emit_len = max(0, first_hit_idx - len(cumulative_text))
-            return new_text[:emit_len], True
+        tool_buf_parts: List[str] = []
+        scan_buffer = ""
+        collected_tools: List[Dict[str, Any]] = []
+        check_stop = self._make_stop_checker(stop or [])
+        window_tail = ""
 
         try:
             for raw_piece in self._iter_stream_tokens(prompt):
-                # 1) PARSE ANTES DE TUDO
-                clean_piece, in_tool, tool_buf, scan_buffer, new_tools = self._parse_stream_piece(
+                clean_piece, in_tool, scan_buffer, new_tools = self._parse_stream_piece(
                     scan_buffer=scan_buffer,
                     piece=raw_piece,
                     in_tool=in_tool,
-                    tool_buf=tool_buf,
+                    tool_buf_parts=tool_buf_parts,
                 )
                 if new_tools:
                     collected_tools.extend(new_tools)
 
-                # 2) STOP
-                to_emit, should_stop = apply_stop(clean_piece)
-
-                # 3) EMITIR
+                to_emit, should_stop, window_tail = check_stop(clean_piece, window_tail)
                 if to_emit:
-                    cumulative_text += to_emit
                     chunk = AIMessageChunk(content=to_emit)
                     if run_manager:
                         try:
@@ -361,15 +354,13 @@ class ChatMLX(BaseChatModel):
                         except Exception:
                             pass
                     yield ChatGenerationChunk(message=chunk)
-
                 if should_stop:
                     break
 
-            # Se sobrou algo no scan_buffer e não estamos dentro de tool, descarte (é cauda parcial)
+            # descartar cauda parcial se não estiver dentro de tool
             if scan_buffer and not in_tool:
                 scan_buffer = ""
 
-            # Emite chunk final só com tool_calls (se houver)
             if collected_tools:
                 yield ChatGenerationChunk(message=AIMessageChunk(content="", tool_calls=collected_tools))
 
@@ -384,14 +375,6 @@ class ChatMLX(BaseChatModel):
         run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> AsyncIterator[ChatGenerationChunk]:
-        """
-        Streaming assíncrono: consome o gerador síncrono em executor sem bloquear o event loop.
-        - Mantém scan_buffer persistente (fronteira de <tool_call>)
-        - Detecta e agrega tool_calls no chunk final
-        - Respeita stop sequences
-        - Emite on_llm_new_token
-        """
-        # 1) Preparação
         try:
             self._ensure_loaded()
             api_messages = self._convert_messages(messages)
@@ -416,53 +399,34 @@ class ChatMLX(BaseChatModel):
 
         prod_fut = loop.run_in_executor(None, producer)
 
-        # 2) Estados do parser / stop
         in_tool = False
-        tool_buf = ""
-        scan_buffer = ""              # <--- persistente entre chunks!
-        collected_tools: list = []
-        stop = stop or []
-        cumulative_text = ""
+        tool_buf_parts: List[str] = []
+        scan_buffer = ""
+        collected_tools: List[Dict[str, Any]] = []
+        check_stop = self._make_stop_checker(stop or [])
+        window_tail = ""
 
-        async def apply_stop_async(new_text: str) -> tuple[str, bool]:
-            if not stop:
-                return new_text, False
-            probe = cumulative_text + new_text
-            first_hit_idx = None
-            for s in stop:
-                idx = probe.find(s)
-                if idx != -1 and (first_hit_idx is None or idx < first_hit_idx):
-                    first_hit_idx = idx
-            if first_hit_idx is None:
-                return new_text, False
-            emit_len = max(0, first_hit_idx - len(cumulative_text))
-            return new_text[:emit_len], True
-
-        # 3) Consumo do stream
         try:
             while True:
                 item = await queue.get()
-
                 if isinstance(item, dict) and item.get("__eos__"):
                     break
                 if isinstance(item, dict) and "__err__" in item:
                     yield ChatGenerationChunk(message=AIMessageChunk(content=f"[stream error] {item['__err__']}"))
                     return
 
-                raw_piece = item  # string normalizada por _iter_stream_tokens
-                # >>> usar scan_buffer persistente E o nome certo do argumento <<<
-                clean_piece, in_tool, tool_buf, scan_buffer, new_tools = self._parse_stream_piece(
+                raw_piece = item  # já normalizado para str
+                clean_piece, in_tool, scan_buffer, new_tools = self._parse_stream_piece(
                     scan_buffer=scan_buffer,
                     piece=raw_piece,
                     in_tool=in_tool,
-                    tool_buf=tool_buf,
+                    tool_buf_parts=tool_buf_parts,
                 )
                 if new_tools:
                     collected_tools.extend(new_tools)
 
-                to_emit, should_stop = await apply_stop_async(clean_piece)
+                to_emit, should_stop, window_tail = check_stop(clean_piece, window_tail)
                 if to_emit:
-                    cumulative_text += to_emit
                     chunk = AIMessageChunk(content=to_emit)
                     if run_manager:
                         try:
@@ -472,22 +436,19 @@ class ChatMLX(BaseChatModel):
                     yield ChatGenerationChunk(message=chunk)
 
                 if should_stop:
-                    # drena a fila até EOS para encerrar ordenadamente
+                    # drena até EOS para encerrar ordenadamente
                     while True:
                         itm = await queue.get()
                         if isinstance(itm, dict) and itm.get("__eos__"):
                             break
                     break
 
-            # Se sobrou algo no scan_buffer e não estamos em tool, descarte (cauda parcial)
             if scan_buffer and not in_tool:
                 scan_buffer = ""
 
-            # Emite chunk final só com tool_calls (se houver)
             if collected_tools:
                 yield ChatGenerationChunk(message=AIMessageChunk(content="", tool_calls=collected_tools))
 
-            # garante encerramento do produtor
             try:
                 await prod_fut
             except Exception:
@@ -495,7 +456,6 @@ class ChatMLX(BaseChatModel):
 
         except Exception as e:
             yield ChatGenerationChunk(message=AIMessageChunk(content=f"[astream error] {e}"))
-
 
     # --------------------------------
     # Conversões / utilidades
@@ -510,12 +470,9 @@ class ChatMLX(BaseChatModel):
         role_mapping = {"human": "user", "ai": "assistant", "system": "system"}
         return role_mapping.get(message_type, "user")
 
-    def _call_api(self, messages: List[Dict], stop: Optional[List[str]] = None, **kwargs) -> Dict:
-        """
-        Chamada real ao modelo MLX (generate).
-        """
+    def _call_generate_mlx_lm(self, messages: List[Dict], stop: Optional[List[str]] = None, **kwargs) -> Dict:
+        """Chamada não-stream do MLX (generate)."""
         self._ensure_loaded()
-
         try:
             prompt = self._tokenizer.apply_chat_template(
                 messages,
@@ -536,20 +493,14 @@ class ChatMLX(BaseChatModel):
         )
 
         detected_tool_calls = self._detect_real_tool_calls(response)
-
         if detected_tool_calls:
             return {"content": "", "tool_calls": detected_tool_calls}
         else:
             return {"content": response, "tool_calls": []}
 
-    async def _acall_api(self, messages: List[Dict], stop: Optional[List[str]] = None, **kwargs) -> Dict:
-        """
-        Versão assíncrona de _call_api - chamada assíncrona ao modelo MLX.
-        """
-        import asyncio
-
+    async def _acall_generate_mlx_lm(self, messages: List[Dict], stop: Optional[List[str]] = None, **kwargs) -> Dict:
+        """Versão assíncrona de _call_generate_mlx_lm usando thread pool (não bloqueia o loop)."""
         self._ensure_loaded()
-
         try:
             prompt = self._tokenizer.apply_chat_template(
                 messages,
@@ -575,7 +526,6 @@ class ChatMLX(BaseChatModel):
             return {"content": f"Async Generate Error: {str(e)}", "tool_calls": []}
 
         detected_tool_calls = self._detect_real_tool_calls(response)
-
         if detected_tool_calls:
             return {"content": "", "tool_calls": detected_tool_calls}
         else:
@@ -589,13 +539,9 @@ class ChatMLX(BaseChatModel):
         tools: Sequence[Union[Dict[str, Any], type, BaseTool]],
         **kwargs: Any,
     ) -> "ChatMLX":
-        """
-        Vincula ferramentas ao modelo.
-        Importante: NÃO criar nova instância aqui (para não perder _model/_tokenizer).
-        """
+        """Vincula ferramentas sem recriar instância."""
         formatted_tools = []
         tool_functions = {}
-
         for tool in tools:
             if hasattr(tool, "name"):  # BaseTool
                 formatted_tools.append(convert_to_openai_tool(tool))
@@ -608,21 +554,17 @@ class ChatMLX(BaseChatModel):
                 formatted_tools.append(convert_to_openai_tool(tool))
                 if hasattr(tool, "__name__"):
                     tool_functions[tool.__name__] = tool
-
         self.bound_tools = formatted_tools
         self.tool_choice = kwargs.get("tool_choice", self.tool_choice)
         self._tool_functions = tool_functions
         return self
-
 
     # --------------------------------
     # Detecção de tool calls no texto completo (fallback)
     # --------------------------------
     def _detect_real_tool_calls(self, response: str) -> List[Dict]:
         tool_calls = []
-        tool_pattern = r"<tool_call>(.*?)</tool_call>"
-        matches = re.findall(tool_pattern, response, re.DOTALL)
-        for match in matches:
+        for match in self._tool_re.findall(response):
             try:
                 tool_data = json.loads(match.strip())
                 tool_calls.append(
@@ -638,6 +580,3 @@ class ChatMLX(BaseChatModel):
         return tool_calls
 
 
-
-
-    

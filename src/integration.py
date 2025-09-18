@@ -27,7 +27,7 @@ async def main():
     """
     Exemplo de uso assíncrono.
     """
-    myllm = ChatMLX()
+    myllm = ChatMLX(max_tokens=4096)
     myllm.init()
 
     agent = create_agent(
@@ -43,8 +43,10 @@ async def main():
         prompt = input("\n\n\nDigite sua pergunta: ")
         if prompt == "exit":
             break
-        
-        async for step, metadata in agent.astream({"messages": [HumanMessage(content=prompt)]}, config=config, stream_mode="messages"):
+
+        input_text = {"messages": [HumanMessage(content=prompt)]}
+
+        async for step, metadata in agent.astream(input_text, config=config, stream_mode="messages"):
             if metadata["langgraph_node"] == "agent" and (text := step.text()):
                 print(text, end="")
                 
@@ -63,49 +65,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-    # main()
-
-    # from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage 
-    # from langchain_core.tools import tool
-    # from langchain.agents import create_agent
-    
-    # @tool
-    # def get_weather(location: str) -> str:
-    #     """Get the weather at a location."""
-    #     return f"It's sunny and 72°F in {location}."
-
-    # @tool
-    # def search_web(query: str) -> str:
-    #     """Search the web for information."""
-    #     return f"Search results for: {query}"
-
-    # # Instanciar o modelo customizado
-    # custom_llm = ChatMLX(
-    #     model_name=Qwen_MODEL_ID,
-    #     api_key="your-api-key",
-    #     temperature=0.5,
-    #     max_tokens=1024,
-    #     top_p=0.85,
-    #     top_k=40,
-    #     repetition_penalty=1.15,
-    #     repetition_context_size=50,
-    # )
-    # # Carrega o modelo/tokenizer uma vez (opcional — _ensure_loaded() faz lazy-load)
-    # custom_llm.init()
-    # print("✅ ChatMLX inicializado com sucesso!")
-
-    # # create_agent pode chamar bind_tools internamente — agora ele NÃO cria nova instância
-    # agent = create_agent(
-    #     model=custom_llm,
-    #     tools=[get_weather, search_web],
-    #     prompt="You are a helpful assistant that can answer questions and use tools.",
-    # )
-
-    # result = agent.invoke({"messages": [HumanMessage("Hello, what is the weather in São Paulo?")]})
-    
-    # # Usar funções de impressão baseadas na documentação LangChain
-    # from message_utils import pretty_print_messages, print_conversation_summary
-    
-    # print("\n📜 RESULTADO DO AGENT:")
-    # pretty_print_messages(result)
-    # print_conversation_summary(result)
+  
