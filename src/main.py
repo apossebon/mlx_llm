@@ -16,6 +16,7 @@ from openai_harmony import (
     SystemContent,
     Author,
     TextContent,
+    ReasoningEffort
 )
 
 from mlx_lm.server import run 
@@ -151,7 +152,7 @@ def create_harmony_conversation_with_tool_result(original_prompt, function_name,
     # Criar mensagens no formato Harmony
     system_message = Message.from_role_and_content(
         Role.SYSTEM,
-        SystemContent.new().with_reasoning_effort("Low")
+        SystemContent.new().with_reasoning_effort(ReasoningEffort.LOW)
     )
     
     developer_message = Message.from_role_and_content(
@@ -186,7 +187,7 @@ def render_harmony_conversation(usermessage: str, functions_definition: str):
     # Criar mensagens no formato Harmony
         system_message = Message.from_role_and_content(
             Role.SYSTEM,
-            SystemContent.new().with_reasoning_effort("Low")
+            SystemContent.new().with_reasoning_effort(ReasoningEffort.LOW)
         )
         
         developer_message = Message.from_role_and_content(
@@ -219,7 +220,7 @@ async def main():
     Qwen_MODEL_ID = "lmstudio-community/Qwen3-30B-A3B-Instruct-2507-MLX-4bit"
     Gemma_MODEL_ID = "mlx-community/gemma-3-27b-it-qat-4bit"
    
-    model, tokenizer = load(Qwen_MODEL_ID)
+    model, tokenizer = load(DEFAULT_MODEL_ID)
 
     _mlx_sampler = make_sampler(temp=0.7, top_p=0.85, top_k=40)
     _mlx_logits_processors = make_logits_processors(repetition_penalty=1.15, repetition_context_size=50)
@@ -228,7 +229,7 @@ async def main():
 
 
     prompt = "Qual é a data e hora atual? Explique também como o tempo funciona."
-    b_harmony = False
+    b_harmony = True
 
     while True:
         prompt = input("Digite sua pergunta: ")

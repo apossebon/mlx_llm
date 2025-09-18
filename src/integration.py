@@ -4,7 +4,8 @@
 from datetime import datetime
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage
-from chatmlx import ChatMLX
+# from chatmlx import ChatMLX
+from chatmlx_gpt import ChatMLX
 from langchain.agents import create_agent
 import asyncio
 from message_utils import pretty_print_messages, print_conversation_summary

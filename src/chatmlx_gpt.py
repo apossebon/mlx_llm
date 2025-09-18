@@ -15,6 +15,18 @@ import re
 
 # Pydantic (para atributos privados de runtime)
 from pydantic import PrivateAttr, Field
+# OpenAI Harmony (para formato de mensagens e ferramentas compatível)
+from openai_harmony import (
+    load_harmony_encoding,
+    HarmonyEncodingName,
+    Role,
+    Message,
+    Conversation,
+    DeveloperContent,
+    SystemContent,
+    Author,
+    TextContent,
+)
 
 ### MLX imports
 from mlx_lm.sample_utils import make_sampler, make_logits_processors
@@ -579,5 +591,36 @@ class ChatMLX(BaseChatModel):
             except json.JSONDecodeError:
                 continue
         return tool_calls
+    # --------------------------------
+    # Futuro: renderização no formato Harmony
+    # --------------------------------
+    def render_harmony_conversation(usermessage: str, functions_definition: str):
+    # Criar mensagens no formato Harmony
+        system_message = Message.from_role_and_content(
+            Role.SYSTEM,
+            SystemContent.new().with_reasoning_effort("Low")
+        )
+        
+        developer_message = Message.from_role_and_content(
+            Role.DEVELOPER,
+            DeveloperContent.new().with_instructions(functions_definition)
+        )
+        
+        user_message = Message.from_role_and_content(
+            Role.USER, 
+            usermessage
+        )
+        
+        # Construir conversa Harmony
+        conversation = Conversation.from_messages([
+            system_message, 
+            developer_message, 
+            user_message
+        ])
+        
+        # Renderizar para tokens
+        tokens = encoding.render_conversation_for_completion(conversation, Role.ASSISTANT)
+        print(f"Tokens Harmony gerados: {len(tokens)}")
+        return tokens
 
 
