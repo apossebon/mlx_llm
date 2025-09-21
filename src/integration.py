@@ -57,7 +57,17 @@ async def main():
 
 
         result = await agent.ainvoke(input_text, config=config)
-        print(result)
+        # Acessar todas as mensagens
+        all_messages = result["messages"]
+        
+        # Pegar apenas a última mensagem (resposta do assistente)
+        last_message = all_messages[-1]
+        
+        # Você pode acessar diferentes propriedades da última mensagem:
+        print("\n📜 ÚLTIMA MENSAGEM:")
+        print(f"Tipo: {last_message.type}")
+        print(f"Conteúdo: {last_message.content}")
+        
         # async for step, metadata in agent.astream(input_text, config=config, stream_mode="messages"):
         #     if metadata["langgraph_node"] == "agent" and (text := step.text()):
         #         print(text, end="")
@@ -68,9 +78,9 @@ async def main():
         #         print("\n")
         
         
-        # print("\n📜 RESULTADO DO AGENT:")
-        # pretty_print_messages(result)
-        # print_conversation_summary(result)
+        print("\n📜 RESULTADO DO AGENT:")
+        pretty_print_messages(result)
+        print_conversation_summary(result)
 
     
 

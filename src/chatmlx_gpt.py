@@ -486,11 +486,28 @@ class ChatMLX(BaseChatModel):
     def _convert_messages(self, messages: List[BaseMessage]) -> List[Dict]:
         api_messages = []
         for message in messages:
-            api_messages.append({"role": self._get_role(message.type), "content": message.content})
+            msg_dict = {
+                "role": self._get_role(message.type), 
+                "content": message.content
+            }
+            
+            # Se for uma mensagem de tool, adicionar campos específicos
+            if message.type == "tool":
+                # ToolMessage tem atributos adicionais
+                if hasattr(message, "name"):
+                    msg_dict["name"] = message.name
+                if hasattr(message, "tool_call_id"):
+                    msg_dict["tool_call_id"] = message.tool_call_id
+                    
+            # Se for uma mensagem do assistente com tool calls
+            elif message.type == "ai" and hasattr(message, "tool_calls") and message.tool_calls:
+                msg_dict["tool_calls"] = message.tool_calls
+                
+            api_messages.append(msg_dict)
         return api_messages
 
     def _get_role(self, message_type: str) -> str:
-        role_mapping = {"human": "user", "ai": "assistant", "system": "system"}
+        role_mapping = {"human": "user", "ai": "assistant", "system": "system", "tool": "tool"}
         return role_mapping.get(message_type, "user")
 
     def _call_generate_mlx_lm(self, messages: List[Dict], stop: Optional[List[str]] = None, **kwargs) -> Dict:
