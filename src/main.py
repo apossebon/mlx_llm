@@ -90,9 +90,9 @@ def detect_function_call(text):
         return True
     
     # Também verifica se há menção a funções específicas
-    for func_name in available_functions.keys():
-        if f"functions.{func_name}" in text or func_name in text:
-            return True
+    # for func_name in available_functions.keys():
+    #     if f"functions.{func_name}" in text or func_name in text:
+    #         return True
     
     return False
 

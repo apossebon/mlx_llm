@@ -17,18 +17,26 @@ async def getDataHora():
     Obtém a data e hora atual no fuso horário de São Paulo.
     
     Returns:
-        dict: Um dicionário contendo:
+        str: Data e hora atual no formato DD/MM/AAAA HH:MM:SS
             - data_hora (str): Data e hora atual no formato DD/MM/AAAA HH:MM:SS
             
     """
 
     return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
 
+def sync_main():
+    myllm = ChatMLX(max_tokens=4096, use_gpt_harmony_response_format=True)
+    myllm.init()
+    
+
+
+    
+
 async def main():
     """
     Exemplo de uso assíncrono.
     """
-    myllm = ChatMLX(max_tokens=4096)
+    myllm = ChatMLX(max_tokens=4096, use_gpt_harmony_response_format=True)
     myllm.init()
 
     agent = create_agent(
@@ -47,14 +55,17 @@ async def main():
 
         input_text = {"messages": [HumanMessage(content=prompt)]}
 
-        async for step, metadata in agent.astream(input_text, config=config, stream_mode="messages"):
-            if metadata["langgraph_node"] == "agent" and (text := step.text()):
-                print(text, end="")
+
+        result = await agent.ainvoke(input_text, config=config)
+        print(result)
+        # async for step, metadata in agent.astream(input_text, config=config, stream_mode="messages"):
+        #     if metadata["langgraph_node"] == "agent" and (text := step.text()):
+        #         print(text, end="")
                 
-            elif metadata["langgraph_node"] == "tools" and (text := step.text()):
-                print("Chamada de Tools:")
-                print(text, end="")
-                print("\n")
+        #     elif metadata["langgraph_node"] == "tools" and (text := step.text()):
+        #         print("Chamada de Tools:")
+        #         print(text, end="")
+        #         print("\n")
         
         
         # print("\n📜 RESULTADO DO AGENT:")

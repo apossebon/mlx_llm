@@ -26,6 +26,7 @@ from openai_harmony import (
     SystemContent,
     Author,
     TextContent,
+    ReasoningEffort
 )
 
 ### MLX imports
@@ -35,6 +36,8 @@ from mlx_lm import load, generate, stream_generate
 DEFAULT_MODEL_ID = "mlx-community/gpt-oss-20b-MXFP4-Q8"
 Qwen_MODEL_ID = "lmstudio-community/Qwen3-30B-A3B-Instruct-2507-MLX-4bit"
 Magistral_MODEL_ID = "lmstudio-community/Magistral-Small-2509-MLX-4bit"
+# Harmony encoding
+encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
 
 
 class ChatMLX(BaseChatModel):
@@ -55,6 +58,8 @@ class ChatMLX(BaseChatModel):
     START_TAG: ClassVar[str] = "<tool_call>"
     END_TAG: ClassVar[str] = "</tool_call>"
     _tool_re: ClassVar[re.Pattern] = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+    # Harmony encoding
+    # encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
 
     # -----------------------------
     # Campos "declarativos" (pydantic)
@@ -87,6 +92,11 @@ class ChatMLX(BaseChatModel):
     # --------------------------------
     def init(self) -> bool:
         """Initialize the model and tokenizer (runtime)."""
+        if self.use_gpt_harmony_response_format:
+            self.model_name = DEFAULT_MODEL_ID
+        else:
+            self.model_name = Qwen_MODEL_ID
+            
         print(f"🔍 Debug - model_name: {self.model_name}")
         try:
             self._mlx_sampler = make_sampler(temp=self.temperature, top_p=self.top_p, top_k=self.top_k)
@@ -129,7 +139,7 @@ class ChatMLX(BaseChatModel):
         except Exception as e:
             content = f"Response from {self.model_name}: Hello from ChatMLX! (Error: {str(e)})"
             tool_calls = []
-        message = AIMessage(content=content, tool_calls=tool_calls or None)
+        message = AIMessage(content=content, tool_calls=tool_calls or [])
         generation = ChatGeneration(message=message)
         return ChatResult(generations=[generation])
 
@@ -148,7 +158,7 @@ class ChatMLX(BaseChatModel):
         except Exception as e:
             content = f"Async response from {self.model_name}: Hello from ChatMLX! (Error: {str(e)})"
             tool_calls = []
-        message = AIMessage(content=content, tool_calls=tool_calls or None)
+        message = AIMessage(content=content, tool_calls=tool_calls or [])
         generation = ChatGeneration(message=message)
         return ChatResult(generations=[generation])
 
@@ -487,11 +497,16 @@ class ChatMLX(BaseChatModel):
         """Chamada não-stream do MLX (generate)."""
         self._ensure_loaded()
         try:
-            prompt = self._tokenizer.apply_chat_template(
-                messages,
-                add_generation_prompt=True,
-                tools=self.bound_tools,
-            )
+
+
+            if self.use_gpt_harmony_response_format:
+                prompt = self.render_harmony_conversation(messages)
+            else:
+                prompt = self._tokenizer.apply_chat_template(
+                    messages,
+                    add_generation_prompt=True,
+                    tools=self.bound_tools,
+                )
         except Exception as e:
             print(f"🔍 Error - {e}")
             return {"content": f"Error: {str(e)}", "tool_calls": []}
@@ -505,21 +520,32 @@ class ChatMLX(BaseChatModel):
             logits_processors=self._mlx_logits_processors,
         )
 
-        detected_tool_calls = self._detect_real_tool_calls(response)
-        if detected_tool_calls:
-            return {"content": "", "tool_calls": detected_tool_calls}
+        if self.use_gpt_harmony_response_format:
+            detected_tool_calls = self._detect_harmony_tool_calls(response)
+            if detected_tool_calls:
+                return {"content": "", "tool_calls": detected_tool_calls}
+            else:
+                return {"content": response, "tool_calls": []}
         else:
-            return {"content": response, "tool_calls": []}
+
+            detected_tool_calls = self._detect_real_tool_calls(response)
+            if detected_tool_calls:
+                return {"content": "", "tool_calls": detected_tool_calls}
+            else:
+                return {"content": response, "tool_calls": []}
 
     async def _acall_generate_mlx_lm(self, messages: List[Dict], stop: Optional[List[str]] = None, **kwargs) -> Dict:
         """Versão assíncrona de _call_generate_mlx_lm usando thread pool (não bloqueia o loop)."""
         self._ensure_loaded()
         try:
-            prompt = self._tokenizer.apply_chat_template(
-                messages,
-                add_generation_prompt=True,
-                tools=self.bound_tools,
-            )
+            if self.use_gpt_harmony_response_format:
+                prompt = self.render_harmony_conversation(messages)
+            else:
+                prompt = self._tokenizer.apply_chat_template(
+                    messages,
+                    add_generation_prompt=True,
+                    tools=self.bound_tools,
+                )
         except Exception as e:
             print(f"🔍 Async Error - {e}")
             return {"content": f"Async Error: {str(e)}", "tool_calls": []}
@@ -538,11 +564,19 @@ class ChatMLX(BaseChatModel):
             print(f"🔍 Async Generate Error - {e}")
             return {"content": f"Async Generate Error: {str(e)}", "tool_calls": []}
 
-        detected_tool_calls = self._detect_real_tool_calls(response)
-        if detected_tool_calls:
-            return {"content": "", "tool_calls": detected_tool_calls}
+        if self.use_gpt_harmony_response_format:
+            detected_tool_calls = self._detect_harmony_tool_calls(response)
+            if detected_tool_calls:
+                return {"content": "", "tool_calls": detected_tool_calls}
+            else:
+                return {"content": response, "tool_calls": []}
         else:
-            return {"content": response, "tool_calls": []}
+
+            detected_tool_calls = self._detect_real_tool_calls(response)
+            if detected_tool_calls:
+                return {"content": "", "tool_calls": detected_tool_calls}
+            else:
+                return {"content": response, "tool_calls": []}
 
     # --------------------------------
     # Ferramentas
@@ -594,11 +628,314 @@ class ChatMLX(BaseChatModel):
     # --------------------------------
     # Futuro: renderização no formato Harmony
     # --------------------------------
-    def render_harmony_conversation(usermessage: str, functions_definition: str):
-    # Criar mensagens no formato Harmony
+    def _detect_harmony_tool_calls(self, response: str) -> List[Dict]:
+        """
+        Detecta tool calls no formato OpenAI Harmony e retorna no mesmo formato
+        que _detect_real_tool_calls para manter compatibilidade.
+        
+        Formato Harmony esperado:
+        <|start|>assistant<|channel|>commentary to=functions.function_name <|constrain|>json<|message|>{"param": "value"}<|call|>
+        """
+        tool_calls = []
+        
+        # Padrão regex para capturar tool calls no formato Harmony
+        # Captura: recipient (função), conteúdo JSON e tipo de constraint
+        harmony_pattern = r'<\|start\|>assistant<\|channel\|>commentary\s+to=functions\.([^<\s]+)(?:\s+<\|constrain\|>(\w+))?<\|message\|>(.*?)<\|call\|>'
+        
+        for match in re.finditer(harmony_pattern, response, re.DOTALL):
+            function_name = match.group(1)  # Nome da função
+            constraint_type = match.group(2) or "json"  # Tipo de constraint (padrão: json)
+            content = match.group(3).strip()  # Conteúdo da mensagem
+            
+            try:
+                # Se o constraint é JSON, tenta fazer parse
+                if constraint_type.lower() == "json":
+                    args_data = json.loads(content)
+                else:
+                    # Para outros tipos, mantém como string
+                    args_data = {"content": content}
+                
+                tool_calls.append({
+                    "name": function_name,
+                    "args": args_data,
+                    "id": f"call_{uuid.uuid4().hex[:8]}",
+                    "type": "tool_call",
+                })
+                
+            except json.JSONDecodeError:
+                # Se falhar no parse JSON, tenta extrair argumentos de forma mais flexível
+                try:
+                    # Tenta encontrar estruturas JSON-like no conteúdo
+                    json_match = re.search(r'\{.*\}', content, re.DOTALL)
+                    if json_match:
+                        args_data = json.loads(json_match.group())
+                        tool_calls.append({
+                            "name": function_name,
+                            "args": args_data,
+                            "id": f"call_{uuid.uuid4().hex[:8]}",
+                            "type": "tool_call",
+                        })
+                except json.JSONDecodeError:
+                    # Como último recurso, cria argumentos vazios
+                    tool_calls.append({
+                        "name": function_name,
+                        "args": {},
+                        "id": f"call_{uuid.uuid4().hex[:8]}",
+                        "type": "tool_call",
+                    })
+                    continue
+        
+        return tool_calls
+
+    def _detect_harmony_analysis_messages(self, response: str) -> List[str]:
+        """
+        Extrai mensagens do canal 'analysis' que contêm o raciocínio do modelo.
+        Essas mensagens não devem ser mostradas ao usuário final.
+        """
+        analysis_messages = []
+        
+        # Padrão para capturar mensagens do canal analysis
+        analysis_pattern = r'<\|start\|>assistant<\|channel\|>analysis<\|message\|>(.*?)<\|end\|>'
+        
+        for match in re.finditer(analysis_pattern, response, re.DOTALL):
+            analysis_content = match.group(1).strip()
+            analysis_messages.append(analysis_content)
+        
+        return analysis_messages
+
+    def _detect_harmony_final_messages(self, response: str) -> List[str]:
+        """
+        Extrai mensagens do canal 'final' que devem ser mostradas ao usuário.
+        """
+        final_messages = []
+        
+        # Padrão para capturar mensagens do canal final
+        final_pattern = r'<\|start\|>assistant<\|channel\|>final<\|message\|>(.*?)<\|end\|>'
+        
+        for match in re.finditer(final_pattern, response, re.DOTALL):
+            final_content = match.group(1).strip()
+            final_messages.append(final_content)
+        
+        return final_messages
+
+    def _detect_harmony_commentary_messages(self, response: str) -> List[str]:
+        """
+        Extrai mensagens do canal 'commentary' que podem incluir preambles
+        para o usuário sobre as ações que serão executadas.
+        """
+        commentary_messages = []
+        
+        # Padrão para capturar mensagens do canal commentary (não tool calls)
+        # Exclui mensagens que têm 'to=functions.' (que são tool calls)
+        commentary_pattern = r'<\|start\|>assistant<\|channel\|>commentary(?!\s+to=functions\.)<\|message\|>(.*?)<\|end\|>'
+        
+        for match in re.finditer(commentary_pattern, response, re.DOTALL):
+            commentary_content = match.group(1).strip()
+            commentary_messages.append(commentary_content)
+        
+        return commentary_messages
+
+    def render_harmony_conversation(self, messages):
+        """
+        Renderiza uma conversa no formato Harmony a partir de uma mensagem ou lista de mensagens.
+        
+        Args:
+            messages (dict | List[dict]): Mensagem única ou lista de mensagens com estrutura:
+                {
+                    "role": "user" | "assistant" | "system" | "tool",
+                    "content": str,
+                    "tool_calls": List[dict] (opcional),
+                    "tool_call_id": str (opcional, para mensagens de tool),
+                    "name": str (opcional, nome da tool para mensagens de tool)
+                }
+        
+        Returns:
+            List[int]: Tokens renderizados para o modelo
+        """
+        harmony_messages = []
+        
+        # Normalizar entrada: se for um dict único, transformar em lista
+        if isinstance(messages, dict):
+            message_list = [messages]
+        elif isinstance(messages, list):
+            message_list = messages
+        else:
+            raise ValueError("messages deve ser um dict ou uma lista de dicts")
+        
+        # Criar mensagem de sistema padrão (se não houver uma na lista)
+        has_system = any(msg.get("role") == "system" for msg in message_list)
+        if not has_system:
+            system_message = Message.from_role_and_content(
+                Role.SYSTEM,
+                SystemContent.new().with_reasoning_effort(ReasoningEffort.LOW)
+            )
+            harmony_messages.append(system_message)
+        
+        # Criar mensagem de desenvolvedor com tools (se não houver uma na lista)
+        has_developer = any(msg.get("role") == "developer" for msg in message_list)
+        if not has_developer and self.bound_tools:
+            developer_message = Message.from_role_and_content(
+                Role.DEVELOPER,
+                DeveloperContent.new().with_instructions("You are a helpful assistant.").with_function_tools(
+                    self._convert_tools_to_harmony_format()
+                )
+            )
+            harmony_messages.append(developer_message)
+        
+        # Processar cada mensagem da lista
+        for message in message_list:
+            role = message.get("role", "user")
+            content = message.get("content", "")
+            
+            if role == "system":
+                # Usar mensagem de sistema personalizada se fornecida
+                system_content = SystemContent.new().with_reasoning_effort(ReasoningEffort.LOW)
+                if content and content != "You are a helpful assistant that can answer questions and use tools.":
+                    # Se há conteúdo personalizado, criar mensagem de sistema customizada
+                    system_message = Message.from_role_and_content(Role.SYSTEM, content)
+                else:
+                    system_message = Message.from_role_and_content(Role.SYSTEM, system_content)
+                harmony_messages.append(system_message)
+                
+            elif role == "user":
+                user_message = Message.from_role_and_content(Role.USER, content)
+                harmony_messages.append(user_message)
+                
+            elif role == "assistant":
+                # Mensagem do assistente
+                if content:
+                    assistant_message = Message.from_role_and_content(Role.ASSISTANT, content).with_channel("final")
+                    harmony_messages.append(assistant_message)
+                
+                # Se há tool calls, adicionar no formato Harmony
+                tool_calls = message.get("tool_calls", [])
+                for tool_call in tool_calls:
+                    # Mensagem de análise (chain of thought)
+                    analysis_message = Message.from_role_and_content(
+                        Role.ASSISTANT, 
+                        f"Need to use function {tool_call['name']}."
+                    ).with_channel("analysis")
+                    harmony_messages.append(analysis_message)
+                    
+                    # Mensagem de chamada da função
+                    function_call_message = Message.from_role_and_content(
+                        Role.ASSISTANT,
+                        json.dumps(tool_call.get("args", {}))
+                    ).with_channel("commentary").with_recipient(f"functions.{tool_call['name']}").with_content_type("<|constrain|> json")
+                    harmony_messages.append(function_call_message)
+                    
+            elif role == "tool":
+                # Mensagem de resposta de tool
+                tool_name = message.get("name", "unknown_tool")
+                tool_message = Message.from_author_and_content(
+                    Author.new(Role.TOOL, f"functions.{tool_name}"),
+                    content
+                ).with_channel("commentary")
+                harmony_messages.append(tool_message)
+                
+            elif role == "developer":
+                # Mensagem de desenvolvedor personalizada
+                if self.bound_tools:
+                    developer_message = Message.from_role_and_content(
+                        Role.DEVELOPER,
+                        DeveloperContent.new().with_instructions(content).with_function_tools(
+                            self._convert_tools_to_harmony_format()
+                        )
+                    )
+                else:
+                    developer_message = Message.from_role_and_content(
+                        Role.DEVELOPER,
+                        DeveloperContent.new().with_instructions(content)
+                    )
+                harmony_messages.append(developer_message)
+        
+        # Construir conversa Harmony
+        conversation = Conversation.from_messages(harmony_messages)
+        
+        # Renderizar para tokens
+        tokens = encoding.render_conversation_for_completion(conversation, Role.ASSISTANT)
+        print(f"Tokens Harmony gerados: {len(tokens)} para {len(message_list)} mensagem(ns)")
+        return tokens
+    
+    def _convert_tools_to_harmony_format(self):
+        """
+        Converte as tools bound para o formato esperado pelo Harmony.
+        
+        Estrutura esperada do bound_tools:
+        {
+            'type': 'function', 
+            'function': {
+                'name': 'getDataHora', 
+                'description': '...', 
+                'parameters': {...}
+            }
+        }
+        """
+        harmony_tools = []
+        
+        # Verificar se bound_tools é uma lista ou dicionário
+        if isinstance(self.bound_tools, dict):
+            # Se é um dicionário único com uma função
+            if 'function' in self.bound_tools:
+                func_info = self.bound_tools['function']
+                tool_name = func_info.get('name', 'unknown_function')
+                description = func_info.get('description', f"Function {tool_name}")
+                parameters = func_info.get('parameters', {})
+                
+                # Criar ToolDescription no formato Harmony
+                from openai_harmony import ToolDescription
+                
+                tool_desc = ToolDescription.new(
+                    tool_name,
+                    description,
+                    parameters=parameters
+                )
+                harmony_tools.append(tool_desc)
+            else:
+                # Se é um dicionário com múltiplas funções (formato antigo)
+                for tool_name, tool_info in self.bound_tools.items():
+                    description = tool_info.get("description", f"Function {tool_name}")
+                    parameters = tool_info.get("parameters", {})
+                    
+                    from openai_harmony import ToolDescription
+                    
+                    tool_desc = ToolDescription.new(
+                        tool_name,
+                        description,
+                        parameters=parameters
+                    )
+                    harmony_tools.append(tool_desc)
+        
+        elif isinstance(self.bound_tools, list):
+            # Se é uma lista de ferramentas
+            for tool_item in self.bound_tools:
+                if isinstance(tool_item, dict) and 'function' in tool_item:
+                    func_info = tool_item['function']
+                    tool_name = func_info.get('name', 'unknown_function')
+                    description = func_info.get('description', f"Function {tool_name}")
+                    parameters = func_info.get('parameters', {})
+                    
+                    from openai_harmony import ToolDescription
+                    
+                    tool_desc = ToolDescription.new(
+                        tool_name,
+                        description,
+                        parameters=parameters
+                    )
+                    harmony_tools.append(tool_desc)
+        
+        return harmony_tools
+
+    def create_harmony_conversation_with_tool_result(original_prompt, function_name, result, functions_definition):
+        """
+        Cria uma nova conversa Harmony incluindo o resultado da ferramenta
+        """
+        result_json = json.dumps(result, ensure_ascii=False)
+        
+        # Criar mensagens no formato Harmony
         system_message = Message.from_role_and_content(
             Role.SYSTEM,
-            SystemContent.new().with_reasoning_effort("Low")
+            SystemContent.new().with_reasoning_effort(ReasoningEffort.LOW)
         )
         
         developer_message = Message.from_role_and_content(
@@ -608,19 +945,22 @@ class ChatMLX(BaseChatModel):
         
         user_message = Message.from_role_and_content(
             Role.USER, 
-            usermessage
+            original_prompt
         )
         
-        # Construir conversa Harmony
+
+        # Criar mensagem de ferramenta corretamente
+        tool_message = Message.from_author_and_content(
+            Author.new(Role.TOOL, function_name),  # Especifica qual ferramenta
+            TextContent(text=result_json)
+        ).with_channel("commentary")
+        
+        # Construir conversa Harmony com resultado da ferramenta
         conversation = Conversation.from_messages([
             system_message, 
             developer_message, 
-            user_message
+            user_message,
+            tool_message
         ])
         
-        # Renderizar para tokens
-        tokens = encoding.render_conversation_for_completion(conversation, Role.ASSISTANT)
-        print(f"Tokens Harmony gerados: {len(tokens)}")
-        return tokens
-
-
+        return conversation
