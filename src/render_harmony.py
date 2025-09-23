@@ -157,28 +157,38 @@ class RenderHarmony:
         functions_definition = self.convert_tools_to_harmony_format(bound_tools)
         system_instruction = "You are a helpful assistant that can answer questions and use tools."
         user_message_content = ""
-        for message in messages:
-            if message.type == "system":
-                system_instruction = message.content
-            elif message.type == "human":
-                user_message_content = message.content
-
 
         system_message = Message.from_role_and_content(
             Role.SYSTEM,
             SystemContent.new().with_reasoning_effort(ReasoningEffort)
         )
-
-        developer_message = Message.from_role_and_content(
-            Role.DEVELOPER,
-            DeveloperContent.new().with_instructions(system_instruction).with_function_tools(functions_definition)
-        )
-
-        user_message = Message.from_role_and_content(Role.USER, user_message_content)
-
         harmony_messages.append(system_message)
-        harmony_messages.append(developer_message)
-        harmony_messages.append(user_message)
+
+
+        for message in messages:
+            content = message.content
+            if message.type == "system":
+                
+                developer_message = Message.from_role_and_content(
+                    Role.DEVELOPER,
+                    DeveloperContent.new().with_instructions(content).with_function_tools(functions_definition)
+                )
+                
+                harmony_messages.append(developer_message)
+            elif message.type == "human":
+                user_message = Message.from_role_and_content(Role.USER, content)
+                harmony_messages.append(user_message)
+            elif message.type == "ai":
+                assistant_message = Message.from_role_and_content(Role.ASSISTANT, content).with_channel("final")
+                harmony_messages.append(assistant_message)
+            elif message.type == "tool":
+                tool_message = Message.from_author_and_content(
+                    Author.new(Role.TOOL, message.name),
+                    content
+                ).with_channel("commentary")
+                harmony_messages.append(tool_message)
+
+
         
         # # Normalizar entrada: se for um dict único, transformar em lista
         # if isinstance(messages, dict):
