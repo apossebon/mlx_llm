@@ -3,7 +3,7 @@ from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Union, Se
 
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import BaseMessage, AIMessage, AIMessageChunk, ToolCall
-from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.outputs import ChatGeneration, ChatResult, ChatGenerationChunk
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from langchain_core.tools import BaseTool
 
@@ -253,14 +253,66 @@ class MyChatModel(BaseChatModel):
         messages: List[BaseMessage],
         stop: Optional[List[str]] = None,
         **kwargs: Any,
-    ) -> AsyncIterator[AIMessageChunk]:
-        # ---- EXEMPLO: substitua por um gerador async real ----
-        for i, piece in enumerate(["Olá", ", ", "streaming ", "assíncrono!"]):
-            yield AIMessageChunk(
-                content=piece,
-                id=None if i else "resp_astream_123",
-                response_metadata=None if i else {"model": self.model_name},
-            )
+    ) -> AsyncIterator[ChatGenerationChunk]:
+        
+        prompt = self._render_harmony.render_harmony_conversation(messages,bound_tools=self.bound_tools)
+        response = ""
+        
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue(maxsize=256)
+        
+        try:
+            def producer():
+                try:
+                    for response in stream_generate(self._model, self._tokenizer, prompt, 
+                    max_tokens=self.max_tokens, sampler=self._mlx_sampler, 
+                    logits_processors=self._mlx_logits_processors):
+                        loop.call_soon_threadsafe(queue.put_nowait, response.text)
+                except Exception as e:
+                    loop.call_soon_threadsafe(queue.put_nowait, {"__err__": str(e)})
+                finally:
+                    loop.call_soon_threadsafe(queue.put_nowait, {"__eos__": True})
+                # Executa producer em thread separada
+            prod_fut = loop.run_in_executor(None, producer)
+            # Consome tokens da queue (não bloqueia)
+            while True:
+                token = await queue.get()  # Assíncrono!
+                if isinstance(token, dict) and token.get("__eos__"):
+                    break
+                if isinstance(token, dict) and "__err__" in token:
+                    yield ChatGenerationChunk(message=AIMessageChunk(content=f"[stream error] {token['__err__']}"))
+                    return
+                raw_piece = token  # já normalizado para str
+               
+
+                response += raw_piece
+                detected_tool_calls = self._render_harmony.detect_harmony_tool_calls(response)
+        
+
+                if detected_tool_calls:
+                    content = ""
+                    tool_calls = detected_tool_calls
+                else:
+                    content = token
+                    tool_calls = []
+                
+                yield ChatGenerationChunk(message=AIMessageChunk(content=content, tool_calls=tool_calls))
+
+                if detected_tool_calls:
+                    while True:
+                        itm = await queue.get()
+                        if isinstance(itm, dict) and itm.get("__eos__"):
+                            break
+                    break
+
+               
+        except Exception as e:
+            print(f"🔍 Async Generate Error - {e}")
+            error_message = {"content": f"Async Generate Error: {str(e)}", "tool_calls": []}
+            yield ChatGenerationChunk(message=AIMessageChunk(content=error_message))
+            return 
+            
+
     # --------------------------------
     # Ferramentas
     # --------------------------------

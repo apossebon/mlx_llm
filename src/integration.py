@@ -3,6 +3,7 @@
 # --------------------------------
 from datetime import datetime
 from langchain_core.tools import tool
+from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_core.messages import HumanMessage
 # from chatmlx import ChatMLX
 # from chatmlx_gpt import ChatMLX
@@ -40,9 +41,28 @@ async def main():
     myllm = MyChatModel(max_tokens=4096, use_gpt_harmony_response_format=True)
     myllm.init()
 
+    client = MultiServerMCPClient(
+        {
+            "ddg-search": {
+                "transport": "streamable_http",
+                "url": "http://192.168.0.111:8001/mcp/"
+            },
+            "yfinance-tools": {
+                "transport": "streamable_http",
+                "url": "http://192.168.0.111:8002/mcp/"
+            },
+            "postgres-tools": {
+                "transport": "streamable_http",
+                "url": "http://192.168.0.111:8003/mcp/"
+            },
+        }
+    )
+    mcp_tools = await client.get_tools()
+    mcp_tools.append(getDataHora)
+
     agent = create_agent(
         model=myllm,
-        tools=[getDataHora],
+        tools= mcp_tools,
         prompt="You are a helpful assistant that can answer questions and use tools.",
         checkpointer= InMemorySaver()
     )
@@ -50,32 +70,32 @@ async def main():
     config={"configurable": {"thread_id": "1"}}
 
     while True:
-        # prompt = input("\n\n\nDigite sua pergunta: ")
-        # if prompt == "exit":
-        #     break
+        prompt = input("\n\n\nDigite sua pergunta: ")
+        if prompt == "exit":
+            break
 
-        input_text = {"messages": [HumanMessage(content="Olá, qual é a data e hora atual?")]}
+        input_text = {"messages": [HumanMessage(content=prompt)]}
 
 
-        result = await agent.ainvoke(input_text, config=config)
-        # Acessar todas as mensagens
-        all_messages = result["messages"]
+        # result = await agent.ainvoke(input_text, config=config)
+        # # Acessar todas as mensagens
+        # all_messages = result["messages"]
         
-        # Pegar apenas a última mensagem (resposta do assistente)
-        last_message = all_messages[-1]
+        # # Pegar apenas a última mensagem (resposta do assistente)
+        # last_message = all_messages[-1]
         
-        # Você pode acessar diferentes propriedades da última mensagem:
-        print("\n📜 ÚLTIMA MENSAGEM:")
-        print(f"Tipo: {last_message.type}")
-        print(f"Conteúdo: {last_message.content}")
+        # # Você pode acessar diferentes propriedades da última mensagem:
+        # print("\n📜 ÚLTIMA MENSAGEM:")
+        # print(f"Tipo: {last_message.type}")
+        # print(f"Conteúdo: {last_message.content}")
         
         async for step, metadata in agent.astream(input_text, config=config, stream_mode="messages"):
             if metadata["langgraph_node"] == "agent" and (text := step.text()):
                 print(text, end="")
                 
             elif metadata["langgraph_node"] == "tools" and (text := step.text()):
-                print("Chamada de Tools:")
-                print(text, end="")
+                # print("Chamada de Tools:")
+                # print(text, end="")
                 print("\n")
         
         
