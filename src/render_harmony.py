@@ -110,10 +110,10 @@ class RenderHarmony:
         
         # Padrão para capturar mensagens do canal final
         # Captura tudo após <|channel|>final<|message|> até encontrar <|end|>, <|start|>, ou fim da string
-        final_pattern = r'<\|channel\|>final<\|message\|>(.*?)(?=<\|(?:end|start)\||$)'
+        final_pattern = r'<\|channel\|>final<\|message\|>[\s\S]([\s\S]*)\Z'
         
         for match in re.finditer(final_pattern, response, re.DOTALL):
-            final_content = match.group(1).strip()
+            final_content = match.group(1) if match else None
             final_messages.append(final_content)
         
         return final_messages

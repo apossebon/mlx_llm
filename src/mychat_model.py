@@ -272,7 +272,7 @@ class MyChatModel(BaseChatModel):
                     loop.call_soon_threadsafe(queue.put_nowait, {"__err__": str(e)})
                 finally:
                     loop.call_soon_threadsafe(queue.put_nowait, {"__eos__": True})
-                # Executa producer em thread separada
+            # Executa producer em thread separada
             prod_fut = loop.run_in_executor(None, producer)
             # Consome tokens da queue (não bloqueia)
             while True:
@@ -287,13 +287,21 @@ class MyChatModel(BaseChatModel):
 
                 response += raw_piece
                 detected_tool_calls = self._render_harmony.detect_harmony_tool_calls(response)
-        
+                # analysis_messages = self._render_harmony.detect_harmony_analysis_messages(response)
+                # commentary_messages = self._render_harmony.detect_harmony_commentary_messages(response)
+                final_messages = self._render_harmony.detect_harmony_final_messages(response)
+                
+
 
                 if detected_tool_calls:
                     content = ""
                     tool_calls = detected_tool_calls
+                    print (f"🔍 Detected tool calls: {tool_calls}")
                 else:
-                    content = token
+                    if final_messages:
+                        content = token
+                    else:
+                        content = ""
                     tool_calls = []
                 
                 yield ChatGenerationChunk(message=AIMessageChunk(content=content, tool_calls=tool_calls))

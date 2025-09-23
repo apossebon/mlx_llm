@@ -2,9 +2,11 @@
 # Exemplo de uso
 # --------------------------------
 from datetime import datetime
+import uuid
 from langchain_core.tools import tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_core.messages import HumanMessage
+from langchain.agents.middleware import SummarizationMiddleware
 # from chatmlx import ChatMLX
 # from chatmlx_gpt import ChatMLX
 from mychat_model import MyChatModel
@@ -41,33 +43,50 @@ async def main():
     myllm = MyChatModel(max_tokens=4096, use_gpt_harmony_response_format=True)
     myllm.init()
 
+    # myllm_summarization = MyChatModel(max_tokens=1024, use_gpt_harmony_response_format=True)
+    # myllm_summarization.init()
+    
     client = MultiServerMCPClient(
         {
             "ddg-search": {
                 "transport": "streamable_http",
-                "url": "http://192.168.0.111:8001/mcp/"
+                "url": "http://192.168.1.105:8001/mcp/"
             },
             "yfinance-tools": {
                 "transport": "streamable_http",
-                "url": "http://192.168.0.111:8002/mcp/"
+                "url": "http://192.168.1.105:8002/mcp/"
             },
             "postgres-tools": {
                 "transport": "streamable_http",
-                "url": "http://192.168.0.111:8003/mcp/"
+                "url": "http://192.168.1.105:8003/mcp/"
             },
         }
     )
     mcp_tools = await client.get_tools()
-    mcp_tools.append(getDataHora)
+    # mcp_tools.append(getDataHora)
+
+    # summarization_middleware = SummarizationMiddleware(
+    #         model=myllm,
+    #         max_tokens_before_summary=4096,  # Trigger summarization at 4000 tokens
+    #         messages_to_keep=10,  # Keep last 10 messages after summary
+    #         summary_prompt="Custom prompt for summarization messagens",  # Optional
+    #     )
 
     agent = create_agent(
         model=myllm,
         tools= mcp_tools,
-        prompt="You are a helpful assistant that can answer questions and use tools.",
-        checkpointer= InMemorySaver()
+        prompt=(
+        "You are a helpful assistant that can answer questions and use tools. "
+        "When choosing a tool, ALWAYS include every required argument from the tool schema. "
+        "If the user has not provided a required argument (e.g., 'ticker' for stock tools), "
+        "ask a brief follow-up question to obtain it before calling the tool."
+        ),
+        checkpointer= InMemorySaver(),
+        # middleware=[summarization_middleware]
     )
 
-    config={"configurable": {"thread_id": "1"}}
+    id_session = uuid.uuid4()
+    config={"configurable": {"thread_id": id_session}}
 
     while True:
         prompt = input("\n\n\nDigite sua pergunta: ")
@@ -88,16 +107,17 @@ async def main():
         # print("\n📜 ÚLTIMA MENSAGEM:")
         # print(f"Tipo: {last_message.type}")
         # print(f"Conteúdo: {last_message.content}")
-        
-        async for step, metadata in agent.astream(input_text, config=config, stream_mode="messages"):
-            if metadata["langgraph_node"] == "agent" and (text := step.text()):
-                print(text, end="")
-                
-            elif metadata["langgraph_node"] == "tools" and (text := step.text()):
-                # print("Chamada de Tools:")
-                # print(text, end="")
-                print("\n")
-        
+        try:
+            async for step, metadata in agent.astream(input_text, config=config, stream_mode="messages"):
+                if metadata["langgraph_node"] == "agent" and (text := step.text()):
+                    print(text, end="")
+                    
+                elif metadata["langgraph_node"] == "tools" and (text := step.text()):
+                    # print("Chamada de Tools:")
+                    # print(text, end="")
+                    print("\n")
+        except Exception as e:
+            print(f"🔍 Error: {e}")
         
         # print("\n📜 RESULTADO DO AGENT:")
         # pretty_print_messages(result)
