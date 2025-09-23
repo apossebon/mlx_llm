@@ -5,7 +5,8 @@ from datetime import datetime
 from langchain_core.tools import tool
 from langchain_core.messages import HumanMessage
 # from chatmlx import ChatMLX
-from chatmlx_gpt import ChatMLX
+# from chatmlx_gpt import ChatMLX
+from mychat_model import MyChatModel
 from langchain.agents import create_agent
 import asyncio
 from message_utils import pretty_print_messages, print_conversation_summary
@@ -25,7 +26,7 @@ async def getDataHora():
     return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
 
 def sync_main():
-    myllm = ChatMLX(max_tokens=4096, use_gpt_harmony_response_format=True)
+    myllm = MyChatModel(max_tokens=4096, use_gpt_harmony_response_format=True)
     myllm.init()
     
 
@@ -36,7 +37,7 @@ async def main():
     """
     Exemplo de uso assíncrono.
     """
-    myllm = ChatMLX(max_tokens=4096, use_gpt_harmony_response_format=True)
+    myllm = MyChatModel(max_tokens=4096, use_gpt_harmony_response_format=True)
     myllm.init()
 
     agent = create_agent(
@@ -49,11 +50,11 @@ async def main():
     config={"configurable": {"thread_id": "1"}}
 
     while True:
-        prompt = input("\n\n\nDigite sua pergunta: ")
-        if prompt == "exit":
-            break
+        # prompt = input("\n\n\nDigite sua pergunta: ")
+        # if prompt == "exit":
+        #     break
 
-        input_text = {"messages": [HumanMessage(content=prompt)]}
+        input_text = {"messages": [HumanMessage(content="Olá, qual é a data e hora atual?")]}
 
 
         result = await agent.ainvoke(input_text, config=config)
@@ -68,19 +69,19 @@ async def main():
         print(f"Tipo: {last_message.type}")
         print(f"Conteúdo: {last_message.content}")
         
-        # async for step, metadata in agent.astream(input_text, config=config, stream_mode="messages"):
-        #     if metadata["langgraph_node"] == "agent" and (text := step.text()):
-        #         print(text, end="")
+        async for step, metadata in agent.astream(input_text, config=config, stream_mode="messages"):
+            if metadata["langgraph_node"] == "agent" and (text := step.text()):
+                print(text, end="")
                 
-        #     elif metadata["langgraph_node"] == "tools" and (text := step.text()):
-        #         print("Chamada de Tools:")
-        #         print(text, end="")
-        #         print("\n")
+            elif metadata["langgraph_node"] == "tools" and (text := step.text()):
+                print("Chamada de Tools:")
+                print(text, end="")
+                print("\n")
         
         
-        print("\n📜 RESULTADO DO AGENT:")
-        pretty_print_messages(result)
-        print_conversation_summary(result)
+        # print("\n📜 RESULTADO DO AGENT:")
+        # pretty_print_messages(result)
+        # print_conversation_summary(result)
 
     
 

@@ -304,6 +304,114 @@ class ChatMLX(BaseChatModel):
 
         return clean_out, in_tool, scan_buffer, new_tools
 
+    def _parse_harmony_stream_piece(
+        self,
+        scan_buffer: str,
+        piece: str,
+        in_final_channel: bool,
+        final_buf_parts: List[str],
+    ) -> tuple[str, bool, str, List[Dict[str, Any]]]:
+        """
+        Parser incremental para formato Harmony com suporte a canais.
+        Filtra apenas mensagens do canal 'final' para exibição ao usuário.
+        Retorna: clean_out, in_final_channel, scan_buffer, new_tools
+        """
+        scan_buffer += piece
+        clean_out = ""
+        new_tools: List[Dict[str, Any]] = []
+
+        # Padrões para diferentes canais Harmony
+        FINAL_START = "<|channel|>final<|message|>"
+        CHANNEL_END_PATTERNS = ["<|end|>", "<|start|>"]
+        
+        # Padrão para tool calls no formato Harmony
+        TOOL_CALL_PATTERN = r'<\|start\|>assistant<\|channel\|>commentary\s+to=functions\.([a-zA-Z_][a-zA-Z0-9_]*)(?:\s+<\|constrain\|>(\w+))?<\|message\|>(.*?)<\|call\|>'
+
+        while True:
+            if in_final_channel:
+                # Procurar fim do canal final
+                end_found = False
+                end_idx = len(scan_buffer)
+                
+                for end_pattern in CHANNEL_END_PATTERNS:
+                    idx = scan_buffer.find(end_pattern)
+                    if idx != -1 and idx < end_idx:
+                        end_idx = idx
+                        end_found = True
+                
+                if not end_found:
+                    # Não encontrou fim, adiciona tudo ao buffer
+                    final_buf_parts.append(scan_buffer)
+                    scan_buffer = ""
+                    break
+                else:
+                    # Encontrou fim, processa conteúdo do canal final
+                    final_content = "".join(final_buf_parts) + scan_buffer[:end_idx]
+                    scan_buffer = scan_buffer[end_idx:]
+                    final_buf_parts.clear()
+                    in_final_channel = False
+                    
+                    # Emite o conteúdo do canal final
+                    clean_out += final_content.strip()
+                    # continua; pode haver mais conteúdo após o fim
+            else:
+                # Procurar início do canal final
+                final_start_idx = scan_buffer.find(FINAL_START)
+                
+                # Procurar tool calls
+                tool_match = re.search(TOOL_CALL_PATTERN, scan_buffer, re.DOTALL)
+                
+                if tool_match and (final_start_idx == -1 or tool_match.start() < final_start_idx):
+                    # Encontrou tool call antes do canal final
+                    function_name = tool_match.group(1)
+                    constraint_type = tool_match.group(2) or "json"
+                    content = tool_match.group(3).strip()
+                    
+                    try:
+                        if constraint_type.lower() == "json":
+                            args_data = json.loads(content)
+                        else:
+                            args_data = {"content": content}
+                        
+                        new_tools.append({
+                            "name": function_name,
+                            "args": args_data,
+                            "id": f"call_{uuid.uuid4().hex[:8]}",
+                            "type": "tool_call",
+                        })
+                    except json.JSONDecodeError:
+                        pass
+                    
+                    # Remove o tool call do buffer
+                    scan_buffer = scan_buffer[tool_match.end():]
+                    continue
+                
+                elif final_start_idx != -1:
+                    # Encontrou início do canal final
+                    # Descarta tudo antes do canal final (analysis, commentary, etc.)
+                    scan_buffer = scan_buffer[final_start_idx + len(FINAL_START):]
+                    in_final_channel = True
+                    final_buf_parts.clear()
+                    # volta ao loop para processar conteúdo do canal
+                else:
+                    # Não encontrou canal final nem tool calls
+                    # Para tool calls, precisamos preservar mais contexto
+                    # Procurar se há início de um padrão de tool call no buffer
+                    tool_start_pos = scan_buffer.find('<|start|>assistant<|channel|>commentary to=functions.')
+                    if tool_start_pos != -1:
+                        # Se encontrou início de tool call, preserva a partir desse ponto
+                        scan_buffer = scan_buffer[tool_start_pos:]
+                    else:
+                        # Preserva uma cauda para fronteira
+                        tool_pattern_start = '<|start|>assistant<|channel|>commentary to=functions.'
+                        keep = max(len(FINAL_START), max(len(p) for p in CHANNEL_END_PATTERNS), len(tool_pattern_start)) - 1
+                        if len(scan_buffer) > keep:
+                            # Descarta tudo exceto a cauda (não emite nada)
+                            scan_buffer = scan_buffer[-keep:]
+                    break
+
+        return clean_out, in_final_channel, scan_buffer, new_tools
+
     def _make_stop_checker(self, stop: List[str]):
         """Cria verificador de stop por janela deslizante (sem concatenar tudo)."""
         if not stop:
@@ -343,15 +451,24 @@ class ChatMLX(BaseChatModel):
         try:
             self._ensure_loaded()
             api_messages = self._convert_messages(messages)
-            prompt = self._tokenizer.apply_chat_template(
-                api_messages, add_generation_prompt=True, tools=self.bound_tools
-            )
+            if self.use_gpt_harmony_response_format:
+                prompt = self.render_harmony_conversation(api_messages)
+            else:
+                prompt = self._tokenizer.apply_chat_template(
+                    api_messages, add_generation_prompt=True, tools=self.bound_tools
+                )
         except Exception as e:
             yield ChatGenerationChunk(message=AIMessageChunk(content=f"[stream init error] {e}"))
             return
 
-        in_tool = False
-        tool_buf_parts: List[str] = []
+        # Inicializar variáveis baseadas no formato
+        if self.use_gpt_harmony_response_format:
+            in_final_channel = False
+            final_buf_parts: List[str] = []
+        else:
+            in_tool = False
+            tool_buf_parts: List[str] = []
+        
         scan_buffer = ""
         collected_tools: List[Dict[str, Any]] = []
         check_stop = self._make_stop_checker(stop or [])
@@ -359,12 +476,21 @@ class ChatMLX(BaseChatModel):
 
         try:
             for raw_piece in self._iter_stream_tokens(prompt):
-                clean_piece, in_tool, scan_buffer, new_tools = self._parse_stream_piece(
-                    scan_buffer=scan_buffer,
-                    piece=raw_piece,
-                    in_tool=in_tool,
-                    tool_buf_parts=tool_buf_parts,
-                )
+                if self.use_gpt_harmony_response_format:
+                    clean_piece, in_final_channel, scan_buffer, new_tools = self._parse_harmony_stream_piece(
+                        scan_buffer=scan_buffer,
+                        piece=raw_piece,
+                        in_final_channel=in_final_channel,
+                        final_buf_parts=final_buf_parts,
+                    )
+                else:
+                    clean_piece, in_tool, scan_buffer, new_tools = self._parse_stream_piece(
+                        scan_buffer=scan_buffer,
+                        piece=raw_piece,
+                        in_tool=in_tool,
+                        tool_buf_parts=tool_buf_parts,
+                    )
+                
                 if new_tools:
                     collected_tools.extend(new_tools)
 
@@ -380,9 +506,13 @@ class ChatMLX(BaseChatModel):
                 if should_stop:
                     break
 
-            # descartar cauda parcial se não estiver dentro de tool
-            if scan_buffer and not in_tool:
-                scan_buffer = ""
+            # descartar cauda parcial se não estiver dentro de tool/canal
+            if self.use_gpt_harmony_response_format:
+                if scan_buffer and not in_final_channel:
+                    scan_buffer = ""
+            else:
+                if scan_buffer and not in_tool:
+                    scan_buffer = ""
 
             if collected_tools:
                 yield ChatGenerationChunk(message=AIMessageChunk(content="", tool_calls=collected_tools))
@@ -401,9 +531,12 @@ class ChatMLX(BaseChatModel):
         try:
             self._ensure_loaded()
             api_messages = self._convert_messages(messages)
-            prompt = self._tokenizer.apply_chat_template(
-                api_messages, add_generation_prompt=True, tools=self.bound_tools
-            )
+            if self.use_gpt_harmony_response_format:
+                prompt = self.render_harmony_conversation(api_messages)
+            else:
+                prompt = self._tokenizer.apply_chat_template(
+                    api_messages, add_generation_prompt=True, tools=self.bound_tools
+                )
         except Exception as e:
             yield ChatGenerationChunk(message=AIMessageChunk(content=f"[stream init error] {e}"))
             return
@@ -422,8 +555,14 @@ class ChatMLX(BaseChatModel):
 
         prod_fut = loop.run_in_executor(None, producer)
 
-        in_tool = False
-        tool_buf_parts: List[str] = []
+        # Inicializar variáveis baseadas no formato
+        if self.use_gpt_harmony_response_format:
+            in_final_channel = False
+            final_buf_parts: List[str] = []
+        else:
+            in_tool = False
+            tool_buf_parts: List[str] = []
+        
         scan_buffer = ""
         collected_tools: List[Dict[str, Any]] = []
         check_stop = self._make_stop_checker(stop or [])
@@ -439,12 +578,21 @@ class ChatMLX(BaseChatModel):
                     return
 
                 raw_piece = item  # já normalizado para str
-                clean_piece, in_tool, scan_buffer, new_tools = self._parse_stream_piece(
-                    scan_buffer=scan_buffer,
-                    piece=raw_piece,
-                    in_tool=in_tool,
-                    tool_buf_parts=tool_buf_parts,
-                )
+                if self.use_gpt_harmony_response_format:
+                    clean_piece, in_final_channel, scan_buffer, new_tools = self._parse_harmony_stream_piece(
+                        scan_buffer=scan_buffer,
+                        piece=raw_piece,
+                        in_final_channel=in_final_channel,
+                        final_buf_parts=final_buf_parts,
+                    )
+                else:
+                    clean_piece, in_tool, scan_buffer, new_tools = self._parse_stream_piece(
+                        scan_buffer=scan_buffer,
+                        piece=raw_piece,
+                        in_tool=in_tool,
+                        tool_buf_parts=tool_buf_parts,
+                    )
+                
                 if new_tools:
                     collected_tools.extend(new_tools)
 
@@ -466,8 +614,13 @@ class ChatMLX(BaseChatModel):
                             break
                     break
 
-            if scan_buffer and not in_tool:
-                scan_buffer = ""
+            # descartar cauda parcial se não estiver dentro de tool/canal
+            if self.use_gpt_harmony_response_format:
+                if scan_buffer and not in_final_channel:
+                    scan_buffer = ""
+            else:
+                if scan_buffer and not in_tool:
+                    scan_buffer = ""
 
             if collected_tools:
                 yield ChatGenerationChunk(message=AIMessageChunk(content="", tool_calls=collected_tools))
@@ -582,6 +735,13 @@ class ChatMLX(BaseChatModel):
             return {"content": f"Async Generate Error: {str(e)}", "tool_calls": []}
 
         if self.use_gpt_harmony_response_format:
+            analysis_messages = self._detect_harmony_analysis_messages(response)
+            print(f"🔍 Analysis Messages - {analysis_messages}")
+            final_messages = self._detect_harmony_final_messages(response)
+            print(f"🔍 Final Messages - {final_messages}")
+            commentary_messages = self._detect_harmony_commentary_messages(response)
+            print(f"🔍 Commentary Messages - {commentary_messages}")
+            # response2 = response.replace(analysis_messages, "").replace(final_messages, "").replace(commentary_messages, "")
             detected_tool_calls = self._detect_harmony_tool_calls(response)
             if detected_tool_calls:
                 return {"content": "", "tool_calls": detected_tool_calls}
@@ -712,7 +872,7 @@ class ChatMLX(BaseChatModel):
         analysis_messages = []
         
         # Padrão para capturar mensagens do canal analysis
-        analysis_pattern = r'<\|start\|>assistant<\|channel\|>analysis<\|message\|>(.*?)<\|end\|>'
+        analysis_pattern = r'<\|channel\|>analysis<\|message\|>(.*?)<\|end\|>'
         
         for match in re.finditer(analysis_pattern, response, re.DOTALL):
             analysis_content = match.group(1).strip()
@@ -727,7 +887,8 @@ class ChatMLX(BaseChatModel):
         final_messages = []
         
         # Padrão para capturar mensagens do canal final
-        final_pattern = r'<\|start\|>assistant<\|channel\|>final<\|message\|>(.*?)<\|end\|>'
+        # Captura tudo após <|channel|>final<|message|> até encontrar <|end|>, <|start|>, ou fim da string
+        final_pattern = r'<\|channel\|>final<\|message\|>(.*?)(?=<\|(?:end|start)\||$)'
         
         for match in re.finditer(final_pattern, response, re.DOTALL):
             final_content = match.group(1).strip()
@@ -744,7 +905,8 @@ class ChatMLX(BaseChatModel):
         
         # Padrão para capturar mensagens do canal commentary (não tool calls)
         # Exclui mensagens que têm 'to=functions.' (que são tool calls)
-        commentary_pattern = r'<\|start\|>assistant<\|channel\|>commentary(?!\s+to=functions\.)<\|message\|>(.*?)<\|end\|>'
+        # Captura tudo após <|channel|>commentary<|message|> até encontrar <|end|>, <|start|>, ou fim da string
+        commentary_pattern = r'<\|channel\|>commentary(?!\s+to=functions\.)<\|message\|>(.*?)(?=<\|(?:end|start)\||$)'
         
         for match in re.finditer(commentary_pattern, response, re.DOTALL):
             commentary_content = match.group(1).strip()
