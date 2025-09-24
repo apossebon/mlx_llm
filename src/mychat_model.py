@@ -77,66 +77,10 @@ class MyChatModel(BaseChatModel):
     def _llm_type(self) -> str:
         return "MyChatModel"
 
-   
-
-    # ---------------------------
-    # Conversão central -> AIMessage
-    # ---------------------------
-    def _to_ai_message(self, data: Dict[str, Any]) -> AIMessage:
-        """
-        Converte o payload de resposta do seu backend para AIMessage.
-        Ajuste os caminhos conforme o formato real da sua API.
-        """
-        # 1) Texto principal (ajuste as chaves conforme seu backend)
-        text = (
-            data.get("output_text")
-            or data.get("message", {}).get("content")
-            or data.get("choices", [{}])[0].get("message", {}).get("content")
-            or ""
-        )
-
-        # 2) Tool calls (se o backend suportar)
-        tool_calls_payload = (
-            data.get("message", {}).get("tool_calls")
-            or data.get("choices", [{}])[0].get("message", {}).get("tool_calls")
-            or []
-        )
-        tool_calls: List[ToolCall] = []
-        for i, tc in enumerate(tool_calls_payload):
-            # Normaliza nomes/campos: {"type":"function","function":{"name":..., "arguments":...}}
-            fn = (tc.get("function") or {})
-            tool_calls.append(
-                ToolCall(
-                    name=fn.get("name", ""),
-                    args=fn.get("arguments", {}) if isinstance(fn.get("arguments"), dict) else fn.get("arguments", "{}"),
-                    id=tc.get("id") or f"toolcall_{i}",
-                )
-            )
-
-        # 3) Usage (tokens) e metadados de resposta
-        usage = (
-            data.get("usage")
-            or data.get("metadata", {}).get("usage")
-            or {}
-        )
-        response_metadata = {
-            "model": data.get("model") or data.get("metadata", {}).get("model"),
-            "finish_reason": data.get("finish_reason")
-            or data.get("choices", [{}])[0].get("finish_reason"),
-            "usage": usage,
-            "raw": {k: v for k, v in data.items() if k not in {"choices"}},  # opcional: anexar original
-        }
-
-        # 4) ID da geração (se existir)
-        message_id = data.get("id") or data.get("message", {}).get("id")
-
-        return AIMessage(
-            content=text,
-            tool_calls=tool_calls if tool_calls else None,
-            id=message_id,
-            response_metadata=response_metadata,
-        )
-
+    @property
+    def _identifying_params(self) -> Dict[str, Any]:
+        return {"model_name": self.model_name}
+    
     # ---------------------------
     # Geração síncrona
     # ---------------------------
@@ -207,10 +151,7 @@ class MyChatModel(BaseChatModel):
         except Exception as e:
             print(f"🔍 Async Generate Error - {e}")
             return {"content": f"Async Generate Error: {str(e)}", "tool_calls": []}
-        #     resp = await client.post(self.api_url, json=payload, headers=headers)
-        #     resp.raise_for_status()
-        #     data = resp.json()
-        # ---------------------------------------------------
+   
         analysis_messages = self._render_harmony.detect_harmony_analysis_messages(response)
         commentary_messages = self._render_harmony.detect_harmony_commentary_messages(response)
         final_messages = self._render_harmony.detect_harmony_final_messages(response)
@@ -236,14 +177,71 @@ class MyChatModel(BaseChatModel):
         stop: Optional[List[str]] = None,
         **kwargs: Any,
     ) -> Iterator[AIMessageChunk]:
-        # ---- EXEMPLO: substitua por um gerador real do seu backend ----
-        chunks = ["Olá", ", ", "streaming ", "síncrono!"]
-        for i, piece in enumerate(chunks):
-            yield AIMessageChunk(
-                content=piece,
-                id=None if i else "resp_stream_123",  # id no primeiro chunk (opcional)
-                response_metadata=None if i else {"model": self.model_name},  # meta inicial (opcional)
-            )
+        prompt = self._render_harmony.render_harmony_conversation(messages,bound_tools=self.bound_tools)
+        response = ""
+        
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue(maxsize=256)
+        
+        try:
+            def producer():
+                try:
+                    for response in stream_generate(self._model, self._tokenizer, prompt, 
+                    max_tokens=self.max_tokens, sampler=self._mlx_sampler, 
+                    logits_processors=self._mlx_logits_processors):
+                        loop.call_soon_threadsafe(queue.put_nowait, response.text)
+                except Exception as e:
+                    loop.call_soon_threadsafe(queue.put_nowait, {"__err__": str(e)})
+                finally:
+                    loop.call_soon_threadsafe(queue.put_nowait, {"__eos__": True})
+            # Executa producer em thread separada
+            prod_fut = loop.run_in_executor(None, producer)
+            # Consome tokens da queue (não bloqueia)
+            while True:
+                token = queue.get()  # Assíncrono!
+                if isinstance(token, dict) and token.get("__eos__"):
+                    break
+                if isinstance(token, dict) and "__err__" in token:
+                    yield ChatGenerationChunk(message=AIMessageChunk(content=f"[stream error] {token['__err__']}"))
+                    return
+                raw_piece = token  # já normalizado para str
+               
+
+                response += raw_piece
+                detected_tool_calls = self._render_harmony.detect_harmony_tool_calls(response)
+                # analysis_messages = self._render_harmony.detect_harmony_analysis_messages(response)
+                # commentary_messages = self._render_harmony.detect_harmony_commentary_messages(response)
+                final_messages = self._render_harmony.detect_harmony_final_messages(response)
+                
+
+
+                if detected_tool_calls:
+                    content = ""
+                    tool_calls = detected_tool_calls
+                    print (f"🔍 Detected tool calls: {tool_calls}")
+                else:
+                    if final_messages:
+                        content = token
+                    else:
+                        content = ""
+                    tool_calls = []
+                
+                yield ChatGenerationChunk(message=AIMessageChunk(content=content, tool_calls=tool_calls))
+
+                if detected_tool_calls:
+                    while True:
+                        itm = queue.get()
+                        if isinstance(itm, dict) and itm.get("__eos__"):
+                            break
+                    break
+
+               
+        except Exception as e:
+            print(f"🔍 Async Generate Error - {e}")
+            error_message = {"content": f"Async Generate Error: {str(e)}", "tool_calls": []}
+            yield ChatGenerationChunk(message=AIMessageChunk(content=error_message))
+            return 
+            
 
     # ---------------------------
     # Streaming assíncrono -> AIMessageChunk

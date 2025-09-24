@@ -9,7 +9,8 @@ from langchain_core.messages import HumanMessage
 from langchain.agents.middleware import SummarizationMiddleware
 # from chatmlx import ChatMLX
 # from chatmlx_gpt import ChatMLX
-from mychat_model import MyChatModel
+# from mychat_model import MyChatModel
+from mychatmodel import MyChatModel
 from langchain.agents import create_agent
 import asyncio
 from message_utils import pretty_print_messages, print_conversation_summary
@@ -29,7 +30,7 @@ async def getDataHora():
     return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
 
 def sync_main():
-    myllm = MyChatModel(max_tokens=4096, use_gpt_harmony_response_format=True)
+    myllm = MyChatModel(model_name="mlx-community/gpt-oss-20b-MXFP4-Q8", max_tokens=4098, use_gpt_harmony_response_format=True)
     myllm.init()
     
 
@@ -40,7 +41,7 @@ async def main():
     """
     Exemplo de uso assíncrono.
     """
-    myllm = MyChatModel(max_tokens=4096, use_gpt_harmony_response_format=True)
+    myllm = MyChatModel(max_tokens=4098, use_gpt_harmony_response_format=True)
     myllm.init()
 
     # myllm_summarization = MyChatModel(max_tokens=1024, use_gpt_harmony_response_format=True)
@@ -56,10 +57,10 @@ async def main():
                 "transport": "streamable_http",
                 "url": "http://192.168.1.105:8002/mcp/"
             },
-            "postgres-tools": {
-                "transport": "streamable_http",
-                "url": "http://192.168.1.105:8003/mcp/"
-            },
+            # "postgres-tools": {
+            #     "transport": "streamable_http",
+            #     "url": "http://192.168.1.105:8003/mcp/"
+            # },
         }
     )
     mcp_tools = await client.get_tools()
