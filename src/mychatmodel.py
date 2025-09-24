@@ -18,7 +18,7 @@ from mlx_lm.sample_utils import make_sampler, make_logits_processors
 from mlx_lm import load, generate, stream_generate
 
 DEFAULT_MODEL_ID = "mlx-community/gpt-oss-20b-MXFP4-Q8"
-Qwen_MODEL_ID = "lmstudio-community/Qwen3-30B-A3B-Instruct-2507-MLX-4bit"
+Qwen_MODEL_ID = "lmstudio-community/Qwen3-4B-Instruct-2507-MLX-4bit"
 
 class MyChatModel(BaseChatModel):
     # -----------------------------
@@ -269,8 +269,15 @@ class MyChatModel(BaseChatModel):
                         break
                 break
             else:
-                # emitir chunks de texto
-                yield ChatGenerationChunk(message=AIMessageChunk(content=token_piece))
+                final_messages = self._render_harmony.detect_harmony_final_messages(acc)
+                if final_messages:
+                    # if run_manager is not None and token_piece:
+                    #     run_manager.on_llm_new_token(token_piece)  # opcional (legacy-style)
+
+    
+                    yield ChatGenerationChunk(message=AIMessageChunk(content=token_piece))
+                else:
+                    yield ChatGenerationChunk(message=AIMessageChunk(content=""))
 
     # ---------------------------
     # Streaming assíncrono → ChatGenerationChunk
@@ -279,7 +286,7 @@ class MyChatModel(BaseChatModel):
         self,
         messages: List[BaseMessage],
         stop: Optional[List[str]] = None,
-        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        # run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> AsyncIterator[ChatGenerationChunk]:
         self._ensure_loaded()
@@ -329,8 +336,8 @@ class MyChatModel(BaseChatModel):
             else:
                 final_messages = self._render_harmony.detect_harmony_final_messages(acc)
                 if final_messages:
-                    if run_manager is not None and token_piece:
-                        run_manager.on_llm_new_token(token_piece)  # opcional (legacy-style)
+                    # if run_manager is not None and token_piece:
+                    #     run_manager.on_llm_new_token(token_piece)  # opcional (legacy-style)
 
     
                     yield ChatGenerationChunk(message=AIMessageChunk(content=token_piece))

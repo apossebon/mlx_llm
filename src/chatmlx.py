@@ -21,7 +21,7 @@ from mlx_lm.sample_utils import make_sampler, make_logits_processors
 from mlx_lm import load, generate, stream_generate
 
 DEFAULT_MODEL_ID = "mlx-community/gpt-oss-20b-MXFP4-Q8"
-Qwen_MODEL_ID = "lmstudio-community/Qwen3-30B-A3B-Instruct-2507-MLX-4bit"
+Qwen_MODEL_ID = "lmstudio-community/Qwen3-4B-Instruct-2507-MLX-4bit"
 Magistral_MODEL_ID = "lmstudio-community/Magistral-Small-2509-MLX-4bit"
 
 
@@ -47,7 +47,7 @@ class ChatMLX(BaseChatModel):
     # -----------------------------
     # Campos "declarativos" (pydantic)
     # -----------------------------
-    model_name: Optional[str] = DEFAULT_MODEL_ID
+    model_name: Optional[str] = Qwen_MODEL_ID
     api_key: Optional[str] = None
     temperature: float = 0.7
     max_tokens: int = 4096

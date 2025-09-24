@@ -7,7 +7,9 @@ from langchain_core.tools import tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langchain_core.messages import HumanMessage
 from langchain.agents.middleware import SummarizationMiddleware
-# from chatmlx import ChatMLX
+from langchain_core.messages import trim_messages
+from typing import Dict, Any
+from chatmlx import ChatMLX
 # from chatmlx_gpt import ChatMLX
 # from mychat_model import MyChatModel
 from mychatmodel import MyChatModel
@@ -29,6 +31,8 @@ async def getDataHora():
 
     return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
 
+
+
 def sync_main():
     myllm = MyChatModel(max_tokens=4098, use_gpt_harmony_response_format=True)
     myllm.init()
@@ -39,7 +43,18 @@ def sync_main():
     print(result)
     
 
-
+def pre_model_hook(state: Dict[str, Any]) -> Dict[str, Any] | None:
+    # state["messages"] contém o histórico atual
+    trimmed = trim_messages(
+        state.get("messages", []),
+        strategy="last",          # preserva as mais recentes
+        token_counter=len,        # conta por "mensagem" (não por tokens)
+        max_tokens=5,             # mantém apenas 5 mensagens
+        include_system=True,      # mantém system se houver
+        start_on="human",
+        end_on=("human", "tool"),
+    )
+    return {"messages": trimmed}
     
 
 async def main():
@@ -49,46 +64,56 @@ async def main():
     myllm = MyChatModel(max_tokens=4098, use_gpt_harmony_response_format=True)
     myllm.init()
 
-    # myllm_summarization = MyChatModel(max_tokens=1024, use_gpt_harmony_response_format=True)
+    # myllm_summarization = ChatMLX(max_tokens=1024, use_gpt_harmony_response_format=False)
     # myllm_summarization.init()
+
+    # summarization_middleware = SummarizationMiddleware(
+    #             model=myllm_summarization,
+    #             # max_tokens_before_summary=1024,  # Trigger summarization at 4000 tokens
+    #             messages_to_keep=10,  # Keep last 10 messages after summary
+    #             # summary_prompt="Custom prompt for summarization messagens",  # Optional
+    #         )
+   
     
     client = MultiServerMCPClient(
         {
             "ddg-search": {
                 "transport": "streamable_http",
-                "url": "http://192.168.1.105:8001/mcp/"
+                "url": "http://192.168.1.103:8001/mcp/"
             },
             "yfinance-tools": {
                 "transport": "streamable_http",
-                "url": "http://192.168.1.105:8002/mcp/"
+                "url": "http://192.168.1.103:8002/mcp/"
             },
             # "postgres-tools": {
             #     "transport": "streamable_http",
-            #     "url": "http://192.168.1.105:8003/mcp/"
+            #     "url": "http://192.168.1.103:8003/mcp/"
             # },
         }
     )
     mcp_tools = await client.get_tools()
     # mcp_tools.append(getDataHora)
 
-    summarization_middleware = SummarizationMiddleware(
-            model=myllm,
-            max_tokens_before_summary=1024,  # Trigger summarization at 4000 tokens
-            messages_to_keep=10,  # Keep last 10 messages after summary
-            # summary_prompt="Custom prompt for summarization messagens",  # Optional
-        )
+    # summarization_middleware = SummarizationMiddleware(
+    #         model=myllm_summarization,
+    #         # max_tokens_before_summary=1024,  # Trigger summarization at 4000 tokens
+    #         messages_to_keep=10,  # Keep last 10 messages after summary
+    #         # summary_prompt="Custom prompt for summarization messagens",  # Optional
+    #     )
 
     agent = create_agent(
         model=myllm,
         tools= mcp_tools,
         prompt=(
-        "You are a helpful assistant that can answer questions and use tools. "
-        "When choosing a tool, ALWAYS include every required argument from the tool schema. "
-        "If the user has not provided a required argument (e.g., 'ticker' for stock tools), "
-        "ask a brief follow-up question to obtain it before calling the tool."
+        "Voce é um dedicados assistente de investimentos que pode responder perguntas sobre investimentos e usar ferramentas para obter informações sobre investimentos."
+        "Use a ferramenta yfinance-tools para obter informações sobre investimentos."
+        "Use a ferramenta ddg-search para obter informações sobre investimentos."
+        "Sempre encontre o ticker ou valide o ticker da empresa com a ferrament especifica."
+        "Sempre que for realizar uma analise de sentimento, procure sempre com a busca utilizendo 'Ultimas noticias da empresa'"
         ),
         checkpointer= InMemorySaver(),
-        middleware=[summarization_middleware]
+        pre_model_hook=pre_model_hook,
+        # middleware=[summarization_middleware]
     )
 
     id_session = uuid.uuid4()
