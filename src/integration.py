@@ -30,8 +30,13 @@ async def getDataHora():
     return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
 
 def sync_main():
-    myllm = MyChatModel(model_name="mlx-community/gpt-oss-20b-MXFP4-Q8", max_tokens=4098, use_gpt_harmony_response_format=True)
+    myllm = MyChatModel(max_tokens=4098, use_gpt_harmony_response_format=True)
     myllm.init()
+
+    #teste sincrono 
+    
+    result = myllm.invoke("Qual é a capital do Brasil?")
+    print(result)
     
 
 
@@ -66,12 +71,12 @@ async def main():
     mcp_tools = await client.get_tools()
     # mcp_tools.append(getDataHora)
 
-    # summarization_middleware = SummarizationMiddleware(
-    #         model=myllm,
-    #         max_tokens_before_summary=4096,  # Trigger summarization at 4000 tokens
-    #         messages_to_keep=10,  # Keep last 10 messages after summary
-    #         summary_prompt="Custom prompt for summarization messagens",  # Optional
-    #     )
+    summarization_middleware = SummarizationMiddleware(
+            model=myllm,
+            max_tokens_before_summary=1024,  # Trigger summarization at 4000 tokens
+            messages_to_keep=10,  # Keep last 10 messages after summary
+            # summary_prompt="Custom prompt for summarization messagens",  # Optional
+        )
 
     agent = create_agent(
         model=myllm,
@@ -83,7 +88,7 @@ async def main():
         "ask a brief follow-up question to obtain it before calling the tool."
         ),
         checkpointer= InMemorySaver(),
-        # middleware=[summarization_middleware]
+        middleware=[summarization_middleware]
     )
 
     id_session = uuid.uuid4()
@@ -95,6 +100,17 @@ async def main():
             break
 
         input_text = {"messages": [HumanMessage(content=prompt)]}
+        async for event in agent.astream_events({"messages": [("user", prompt)]},
+                                 version="v1", config=config):
+            # eventos úteis:
+            if event["event"] == "on_chat_model_stream":
+                # delta token-a-token do modelo
+                print(event["data"]["chunk"].content or "", end="")
+            elif event["event"] == "on_tool_start":
+                print(f"\n[tool start] {event['name']}")
+            elif event["event"] == "on_tool_end":
+                print(f"\n[tool end]   {event['name']}")
+        print()
 
 
         # result = await agent.ainvoke(input_text, config=config)
@@ -108,17 +124,17 @@ async def main():
         # print("\n📜 ÚLTIMA MENSAGEM:")
         # print(f"Tipo: {last_message.type}")
         # print(f"Conteúdo: {last_message.content}")
-        try:
-            async for step, metadata in agent.astream(input_text, config=config, stream_mode="messages"):
-                if metadata["langgraph_node"] == "agent" and (text := step.text()):
-                    print(text, end="")
+        # try:
+        #     async for step, metadata in agent.astream(input_text, config=config, stream_mode="messages"):
+        #         if metadata["langgraph_node"] == "agent" and (text := step.text()):
+        #             print(text, end="")
                     
-                elif metadata["langgraph_node"] == "tools" and (text := step.text()):
-                    # print("Chamada de Tools:")
-                    # print(text, end="")
-                    print("\n")
-        except Exception as e:
-            print(f"🔍 Error: {e}")
+        #         elif metadata["langgraph_node"] == "tools" and (text := step.text()):
+        #             # print("Chamada de Tools:")
+        #             # print(text, end="")
+        #             print("\n")
+        # except Exception as e:
+        #     print(f"🔍 Error: {e}")
         
         # print("\n📜 RESULTADO DO AGENT:")
         # pretty_print_messages(result)
@@ -128,5 +144,6 @@ async def main():
 
 
 if __name__ == "__main__":
+    # sync_main()
     asyncio.run(main())
   

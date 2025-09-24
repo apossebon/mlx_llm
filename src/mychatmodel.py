@@ -8,6 +8,7 @@ from langchain_core.messages import BaseMessage, AIMessage, AIMessageChunk, Tool
 from langchain_core.outputs import ChatGeneration, ChatResult, ChatGenerationChunk
 from langchain_core.tools import BaseTool
 from langchain_core.utils.function_calling import convert_to_openai_tool
+from langchain_core.callbacks import CallbackManagerForLLMRun
 
 from render_harmony import RenderHarmony
 import asyncio
@@ -127,12 +128,23 @@ class MyChatModel(BaseChatModel):
 
         content = "" if tool_calls else (final_text or "")
 
+        input_tokens = len(tokens)  # prompt já está em tokens Harmony
+        # conte tokens de saída com o tokenizer do MLX
+        try:
+            output_tokens = len(self._tokenizer.encode(resp_text))
+        except Exception:
+            # fallback (menos preciso) se o tokenizer não expuser encode
+            output_tokens = len(resp_text)
+
+        total_tokens = input_tokens + output_tokens
+
         ai = AIMessage(
             content=content,
             tool_calls=tool_calls,
             usage_metadata={
-                "input_tokens": sum(len(getattr(m, "content", "") or "") for m in messages),
-                "output_tokens": len(resp_text or ""),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": total_tokens,      # <-- obrigatório no v1
             },
             response_metadata={"model_name": self.model_name},
         )
@@ -177,13 +189,23 @@ class MyChatModel(BaseChatModel):
         tool_calls: List[ToolCall] = self._render_harmony.to_lc_tool_calls(detected) if detected else []
 
         content = "" if tool_calls else (final_text or "")
+        input_tokens = len(tokens)
+
+        try:
+            output_tokens = len(self._tokenizer.encode(resp_text))
+        except Exception:
+            # fallback (menos preciso) se o tokenizer não expuser encode
+            output_tokens = len(resp_text)
+
+        total_tokens = input_tokens + output_tokens
 
         ai = AIMessage(
             content=content,
             tool_calls=tool_calls,
             usage_metadata={
-                "input_tokens": sum(len(getattr(m, "content", "") or "") for m in messages),
-                "output_tokens": len(resp_text or ""),
+                "input_tokens": input_tokens,
+                "output_tokens": output_tokens,
+                "total_tokens": total_tokens,      # <-- obrigatório no v1
             },
             response_metadata={"model_name": self.model_name},
         )
@@ -257,6 +279,7 @@ class MyChatModel(BaseChatModel):
         self,
         messages: List[BaseMessage],
         stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
         **kwargs: Any,
     ) -> AsyncIterator[ChatGenerationChunk]:
         self._ensure_loaded()
@@ -306,6 +329,10 @@ class MyChatModel(BaseChatModel):
             else:
                 final_messages = self._render_harmony.detect_harmony_final_messages(acc)
                 if final_messages:
+                    if run_manager is not None and token_piece:
+                        run_manager.on_llm_new_token(token_piece)  # opcional (legacy-style)
+
+    
                     yield ChatGenerationChunk(message=AIMessageChunk(content=token_piece))
                 else:
                     yield ChatGenerationChunk(message=AIMessageChunk(content=""))
