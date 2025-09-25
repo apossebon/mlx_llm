@@ -15,6 +15,7 @@ import asyncio
 
 # MLX
 from mlx_lm.sample_utils import make_sampler, make_logits_processors
+from mlx_lm.models.cache import make_prompt_cache
 from mlx_lm import load, generate, stream_generate
 
 DEFAULT_MODEL_ID = "mlx-community/gpt-oss-20b-MXFP4-Q8"
@@ -33,6 +34,7 @@ class MyChatModel(BaseChatModel):
     repetition_penalty: float = 1.15
     repetition_context_size: int = 50
     use_gpt_harmony_response_format: bool = False
+    use_prompt_cache: bool = False
 
     # Evita estado compartilhado
     bound_tools: List[Dict[str, Any]] = Field(default_factory=list)
@@ -45,6 +47,7 @@ class MyChatModel(BaseChatModel):
     _tokenizer: Any = PrivateAttr(default=None)
     _mlx_sampler: Any = PrivateAttr(default=None)
     _mlx_logits_processors: Any = PrivateAttr(default=None)
+    _mlx_prompt_cache: Any = PrivateAttr(default=None)
     _tool_functions: Dict[str, Any] = PrivateAttr(default_factory=dict)
     _render_harmony: RenderHarmony = PrivateAttr(default=None)
 
@@ -59,6 +62,7 @@ class MyChatModel(BaseChatModel):
                 repetition_context_size=self.repetition_context_size,
             )
             self._model, self._tokenizer = load(self.model_name)
+            self._mlx_prompt_cache = make_prompt_cache(self._model) if self.use_prompt_cache else None
             self._render_harmony = RenderHarmony()
             return True
         except Exception as e:
@@ -107,6 +111,7 @@ class MyChatModel(BaseChatModel):
                 max_tokens=self.max_tokens,
                 sampler=self._mlx_sampler,
                 logits_processors=self._mlx_logits_processors,
+                prompt_cache=self._mlx_prompt_cache if self.use_prompt_cache else None,
             )
         except Exception as e:
             ai = AIMessage(content=f"[generate error] {e}")
@@ -170,6 +175,7 @@ class MyChatModel(BaseChatModel):
                 self.max_tokens,  # max_tokens como arg posicional é aceito por generate
                 self._mlx_sampler,
                 self._mlx_logits_processors,
+                prompt_cache=self._mlx_prompt_cache if self.use_prompt_cache else None,
             )
         except Exception as e:
             ai = AIMessage(content=f"[async generate error] {e}")
@@ -237,6 +243,7 @@ class MyChatModel(BaseChatModel):
                     max_tokens=self.max_tokens,
                     sampler=self._mlx_sampler,
                     logits_processors=self._mlx_logits_processors,
+                    prompt_cache=self._mlx_prompt_cache if self.use_prompt_cache else None,
                 ):
                     q.put(part.text)  # pedaço de texto
             except Exception as e:
@@ -276,8 +283,7 @@ class MyChatModel(BaseChatModel):
 
     
                     yield ChatGenerationChunk(message=AIMessageChunk(content=token_piece))
-                else:
-                    yield ChatGenerationChunk(message=AIMessageChunk(content=""))
+                
 
     # ---------------------------
     # Streaming assíncrono → ChatGenerationChunk
@@ -302,6 +308,7 @@ class MyChatModel(BaseChatModel):
                     max_tokens=self.max_tokens,
                     sampler=self._mlx_sampler,
                     logits_processors=self._mlx_logits_processors,
+                    prompt_cache=self._mlx_prompt_cache if self.use_prompt_cache else None,
                 ):
                     loop.call_soon_threadsafe(q.put_nowait, part.text)
             except Exception as e:
@@ -341,8 +348,7 @@ class MyChatModel(BaseChatModel):
 
     
                     yield ChatGenerationChunk(message=AIMessageChunk(content=token_piece))
-                else:
-                    yield ChatGenerationChunk(message=AIMessageChunk(content=""))
+                
 
 
                 

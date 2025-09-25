@@ -7,6 +7,7 @@ requires-python = ">=3.13"
 dependencies = [
     "langchain>=1.0.0a5",
     "langchain-mcp-adapters>=0.1.10",
+    "langchain-openai>=0.3.33",
     "mlx-lm>=0.27.1",
     "openai>=1.106.1",
     "openai-agents>=0.2.11",

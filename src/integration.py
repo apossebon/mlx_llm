@@ -17,6 +17,8 @@ from langchain.agents import create_agent
 import asyncio
 from message_utils import pretty_print_messages, print_conversation_summary
 from langgraph.checkpoint.memory import InMemorySaver
+from llm_factory import LLMFactory
+import server
 
 @tool
 async def getDataHora():
@@ -30,6 +32,7 @@ async def getDataHora():
     """
 
     return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+
 
 
 
@@ -49,7 +52,7 @@ def pre_model_hook(state: Dict[str, Any]) -> Dict[str, Any] | None:
         state.get("messages", []),
         strategy="last",          # preserva as mais recentes
         token_counter=len,        # conta por "mensagem" (não por tokens)
-        max_tokens=5,             # mantém apenas 5 mensagens
+        max_tokens= 10,             # mantém apenas 5 mensagens
         include_system=True,      # mantém system se houver
         start_on="human",
         end_on=("human", "tool"),
@@ -61,18 +64,21 @@ async def main():
     """
     Exemplo de uso assíncrono.
     """
-    myllm = MyChatModel(max_tokens=4098, use_gpt_harmony_response_format=True)
+    #myllm = MyChatModel(max_tokens=4098, use_gpt_harmony_response_format=True, use_prompt_cache=False)
+    myllm = ChatMLX(max_tokens=4098, use_gpt_harmony_response_format=False)
     myllm.init()
 
-    # myllm_summarization = ChatMLX(max_tokens=1024, use_gpt_harmony_response_format=False)
-    # myllm_summarization.init()
+    llm_factory = LLMFactory()
 
-    # summarization_middleware = SummarizationMiddleware(
-    #             model=myllm_summarization,
-    #             # max_tokens_before_summary=1024,  # Trigger summarization at 4000 tokens
-    #             messages_to_keep=10,  # Keep last 10 messages after summary
-    #             # summary_prompt="Custom prompt for summarization messagens",  # Optional
-    #         )
+    myllm_summarization = llm_factory.get_LMStudio_llm("lmstudio-community/Qwen3-4B-Instruct-2507-MLX-4bit")
+   
+
+    summarization_middleware = SummarizationMiddleware(
+                model=myllm_summarization,
+                max_tokens_before_summary=1024,  # Trigger summarization at 4000 tokens
+                messages_to_keep=10,  # Keep last 10 messages after summary
+                # summary_prompt="Custom prompt for summarization messagens",  # Optional
+            )
    
     
     client = MultiServerMCPClient(
@@ -106,14 +112,18 @@ async def main():
         tools= mcp_tools,
         prompt=(
         "Voce é um dedicados assistente de investimentos que pode responder perguntas sobre investimentos e usar ferramentas para obter informações sobre investimentos."
+        "## INSTRUÇÕES:\n"
         "Use a ferramenta yfinance-tools para obter informações sobre investimentos."
         "Use a ferramenta ddg-search para obter informações sobre investimentos."
         "Sempre encontre o ticker ou valide o ticker da empresa com a ferrament especifica."
         "Sempre que for realizar uma analise de sentimento, procure sempre com a busca utilizendo 'Ultimas noticias da empresa'"
+        "## DADOS:\n"
+        "Utilize quantas vezes necessario as ferramentas disponivies antes de formular a resposta final"
+        
         ),
         checkpointer= InMemorySaver(),
-        pre_model_hook=pre_model_hook,
-        # middleware=[summarization_middleware]
+        # pre_model_hook=pre_model_hook,
+        middleware=[summarization_middleware]
     )
 
     id_session = uuid.uuid4()
@@ -130,9 +140,13 @@ async def main():
             # eventos úteis:
             if event["event"] == "on_chat_model_stream":
                 # delta token-a-token do modelo
-                print(event["data"]["chunk"].content or "", end="")
+                #print(f'{event["metadata"]["langgraph_node"]}')
+                if event["metadata"]["langgraph_node"] != "SummarizationMiddleware.before_model":
+                    print(event["data"]["chunk"].content or "", end="")
+                
             elif event["event"] == "on_tool_start":
                 print(f"\n[tool start] {event['name']}")
+                print(f"\n[tool start] {event['data']}")
             elif event["event"] == "on_tool_end":
                 print(f"\n[tool end]   {event['name']}")
         print()
