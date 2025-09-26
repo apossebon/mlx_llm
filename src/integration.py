@@ -70,13 +70,13 @@ async def main():
 
     llm_factory = LLMFactory()
 
-    myllm_summarization = llm_factory.get_LMStudio_llm("lmstudio-community/Qwen3-4B-Instruct-2507-MLX-4bit")
+    # myllm_summarization = llm_factory.get_LMStudio_llm("lmstudio-community/Qwen3-4B-Instruct-2507-MLX-4bit")
    
 
     summarization_middleware = SummarizationMiddleware(
-                model=myllm_summarization,
+                model=myllm,
                 max_tokens_before_summary=1024,  # Trigger summarization at 4000 tokens
-                messages_to_keep=10,  # Keep last 10 messages after summary
+                messages_to_keep=5,  # Keep last 10 messages after summary
                 # summary_prompt="Custom prompt for summarization messagens",  # Optional
             )
    
