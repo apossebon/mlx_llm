@@ -1,5 +1,8 @@
 from __future__ import annotations
-from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Union, Sequence
+from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Union, Sequence, ClassVar
+import re
+import json
+import uuid
 
 from pydantic import PrivateAttr, Field
 
@@ -22,6 +25,14 @@ DEFAULT_MODEL_ID = "mlx-community/gpt-oss-20b-MXFP4-Q8"
 Qwen_MODEL_ID = "lmstudio-community/Qwen3-4B-Instruct-2507-MLX-4bit"
 
 class MyChatModel(BaseChatModel):
+
+    # -----------------------------
+    # Constantes / Regex pré-compilado
+    # -----------------------------
+    START_TAG: ClassVar[str] = "<tool_call>"
+    END_TAG: ClassVar[str] = "</tool_call>"
+    _tool_re: ClassVar[re.Pattern] = re.compile(r"<tool_call>(.*?)</tool_call>", re.DOTALL)
+
     # -----------------------------
     # Campos Pydantic
     # -----------------------------
@@ -267,20 +278,26 @@ class MyChatModel(BaseChatModel):
 
             detected = self._render_harmony.detect_harmony_tool_calls(acc)
             if detected:
-                tool_calls: List[ToolCall] = self._render_harmony.to_lc_tool_calls(detected)
-                yield ChatGenerationChunk(message=AIMessageChunk(content="", tool_calls=tool_calls))
+                # tool_calls: List[ToolCall] = self._render_harmony.to_lc_tool_calls(detected)
+                
+                # yield ChatGenerationChunk(message=AIMessageChunk(content="", tool_calls=tool_calls))
                 # drenar até EOS
                 while True:
-                    end_item = q.get()
+                    end_item = await q.get()                 
+                    # ler todos os tokens até EOS
                     if isinstance(end_item, dict) and end_item.get("__eos__"):
                         break
+                    else:
+                        token_piece: str = end_item
+                        acc += token_piece                
+                    
+                detected = self._render_harmony.detect_harmony_tool_calls(acc)
+                tool_calls: List[ToolCall] = self._render_harmony.to_lc_tool_calls(detected)
+                yield ChatGenerationChunk(message=AIMessageChunk(content="", tool_calls=tool_calls))
                 break
             else:
                 final_messages = self._render_harmony.detect_harmony_final_messages(acc)
                 if final_messages:
-                    # if run_manager is not None and token_piece:
-                    #     run_manager.on_llm_new_token(token_piece)  # opcional (legacy-style)
-
     
                     yield ChatGenerationChunk(message=AIMessageChunk(content=token_piece))
                 
@@ -319,8 +336,12 @@ class MyChatModel(BaseChatModel):
         loop.run_in_executor(None, producer)
 
         acc = ""
+        
         while True:
             item = await q.get()
+            
+                
+
             if isinstance(item, dict) and item.get("__eos__"):
                 break
             if isinstance(item, dict) and "__err__" in item:
@@ -330,27 +351,47 @@ class MyChatModel(BaseChatModel):
             token_piece: str = item
             acc += token_piece
 
+
+           
+            
+
             detected = self._render_harmony.detect_harmony_tool_calls(acc)
             if detected:
-                tool_calls: List[ToolCall] = self._render_harmony.to_lc_tool_calls(detected)
-                yield ChatGenerationChunk(message=AIMessageChunk(content="", tool_calls=tool_calls))
+                # tool_calls: List[ToolCall] = self._render_harmony.to_lc_tool_calls(detected)
+                
+                # yield ChatGenerationChunk(message=AIMessageChunk(content="", tool_calls=tool_calls))
                 # drenar até EOS
                 while True:
-                    end_item = await q.get()
+                    end_item = await q.get()                 
+                    # ler todos os tokens até EOS
                     if isinstance(end_item, dict) and end_item.get("__eos__"):
                         break
+                    else:
+                        token_piece: str = end_item
+                        acc += token_piece                
+                    
+                detected = self._render_harmony.detect_harmony_tool_calls(acc)
+                tool_calls: List[ToolCall] = self._render_harmony.to_lc_tool_calls(detected)
+                yield ChatGenerationChunk(message=AIMessageChunk(content="", tool_calls=tool_calls))
                 break
             else:
                 final_messages = self._render_harmony.detect_harmony_final_messages(acc)
                 if final_messages:
-                    # if run_manager is not None and token_piece:
-                    #     run_manager.on_llm_new_token(token_piece)  # opcional (legacy-style)
-
     
                     yield ChatGenerationChunk(message=AIMessageChunk(content=token_piece))
                 
 
+#     text = """
+# <|channel|>analysis<|message|>Need to find tickers, then get price. Use find_ticker_tool for Embraer and Petrobras.<|end|>
+# <|start|>assistant
+# <|channel|>
+# commentary to=functions.find_ticker_tool <|constrain|>json<|message|>{"company_name":"Embraer"}<|call|>
+# commentary to=functions.get_stock_price_tool <|constrain|>json<|message|>{"ticker":"EMBR3.SA"}<|call|>
+# commentary to=functions.find_ticker_tool <|constrain|>json<|message|>{"company_name":"Petrobras"}<|call|>
+# commentary to=functions.get_stock_price_tool <|constrain|>json<|message|>{"ticker":"PETR4.SA"}<|call|>
 
+# assistant<|channel|>final<|message|>**Cotação atual (último pregão):**
+# """
                 
 
     # --------------------------------
@@ -389,4 +430,37 @@ class MyChatModel(BaseChatModel):
             return self.bind(tools=formatted_tools, tool_choice=self.tool_choice)
 
         return self
+
+    # --------------------------------
+    # Detecção de tool calls no texto completo (fallback)
+    # --------------------------------
+    def _detect_real_tool_calls(self, response: str) -> List[Dict]:
+        tool_calls = []
+        for match in self._tool_re.findall(response):
+            try:
+                tool_data = json.loads(match.strip())
+                tool_calls.append(
+                    {
+                        "name": tool_data["name"],
+                        "args": tool_data.get("arguments", tool_data.get("args", {})),
+                        "id": f"call_{uuid.uuid4().hex[:8]}",
+                        "type": "tool_call",
+                    }
+                )
+            except json.JSONDecodeError:
+                continue
+        return tool_calls
+
+    # --------------------------------
+    # Conversões / utilidades
+    # --------------------------------
+    def _convert_messages(self, messages: List[BaseMessage]) -> List[Dict]:
+        api_messages = []
+        for message in messages:
+            api_messages.append({"role": self._get_role(message.type), "content": message.content})
+        return api_messages
+
+    def _get_role(self, message_type: str) -> str:
+        role_mapping = {"human": "user", "ai": "assistant", "system": "system", "tool": "tool"}
+        return role_mapping.get(message_type, "user")
 

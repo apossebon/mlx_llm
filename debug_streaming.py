@@ -6,6 +6,11 @@ import asyncio
 from langchain_core.messages import HumanMessage
 from src.chatmlx_gpt import ChatMLX
 
+
+
+
+
+
 async def test_streaming():
     """Test both Harmony and regular streaming"""
     

@@ -64,8 +64,8 @@ async def main():
     """
     Exemplo de uso assíncrono.
     """
-    #myllm = MyChatModel(max_tokens=4098, use_gpt_harmony_response_format=True, use_prompt_cache=False)
-    myllm = ChatMLX(max_tokens=4098, use_gpt_harmony_response_format=False)
+    myllm = MyChatModel(max_tokens=4098, use_gpt_harmony_response_format=True, use_prompt_cache=False, model_name="mlx-community/gpt-oss-20b-MXFP4-Q8")
+    # myllm = ChatMLX(max_tokens=4098, use_gpt_harmony_response_format=False)
     myllm.init()
 
     llm_factory = LLMFactory()
@@ -85,11 +85,11 @@ async def main():
         {
             "ddg-search": {
                 "transport": "streamable_http",
-                "url": "http://192.168.1.103:8001/mcp/"
+                "url": "http://localhost:8001/mcp/"
             },
             "yfinance-tools": {
                 "transport": "streamable_http",
-                "url": "http://192.168.1.103:8002/mcp/"
+                "url": "http://localhost:8002/mcp/"
             },
             # "postgres-tools": {
             #     "transport": "streamable_http",

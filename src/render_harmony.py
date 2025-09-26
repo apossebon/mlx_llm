@@ -15,7 +15,8 @@ from openai_harmony import (
     DeveloperContent,
     SystemContent,
     Author,
-    ReasoningEffort
+    ReasoningEffort,
+    StreamableParser
 )
 
 class RenderHarmony:
@@ -30,8 +31,12 @@ class RenderHarmony:
         <|message|>{"param": "value"}<|call|>
         """
         tool_calls: List[Dict] = []
+        # pattern = (
+        #     r'<\|start\|>assistant<\|channel\|>commentary\s+to=functions\.([^<\s]+)'
+        #     r'(?:\s+<\|constrain\|>(\w+))?<\|message\|>(.*?)<\|call\|>'
+        # )
         pattern = (
-            r'<\|start\|>assistant<\|channel\|>commentary\s+to=functions\.([^<\s]+)'
+            r'commentary\s+to=functions\.([^<\s]+)'
             r'(?:\s+<\|constrain\|>(\w+))?<\|message\|>(.*?)<\|call\|>'
         )
         for m in re.finditer(pattern, response, re.DOTALL):
@@ -165,3 +170,9 @@ class RenderHarmony:
                                                              f.get("description", f"Function {f.get('name','')}"),
                                                              parameters=f.get("parameters", {})))
         return harmony_tools
+
+    def decode_harmony_tokens(self) -> StreamableParser:
+        """Decodifica tokens Harmony para texto."""
+        encoding = load_harmony_encoding(HarmonyEncodingName.HARMONY_GPT_OSS)
+        stream = StreamableParser(encoding, role=Role.ASSISTANT)
+        return stream
