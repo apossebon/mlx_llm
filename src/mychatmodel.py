@@ -283,7 +283,7 @@ class MyChatModel(BaseChatModel):
                 # yield ChatGenerationChunk(message=AIMessageChunk(content="", tool_calls=tool_calls))
                 # drenar até EOS
                 while True:
-                    end_item = await q.get()                 
+                    end_item = q.get()                 
                     # ler todos os tokens até EOS
                     if isinstance(end_item, dict) and end_item.get("__eos__"):
                         break
