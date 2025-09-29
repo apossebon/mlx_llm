@@ -73,12 +73,12 @@ async def main():
     # myllm_summarization = llm_factory.get_LMStudio_llm("lmstudio-community/Qwen3-4B-Instruct-2507-MLX-4bit")
    
 
-    summarization_middleware = SummarizationMiddleware(
-                model=myllm,
-                max_tokens_before_summary=1024,  # Trigger summarization at 4000 tokens
-                messages_to_keep=5,  # Keep last 10 messages after summary
-                # summary_prompt="Custom prompt for summarization messagens",  # Optional
-            )
+    # summarization_middleware = SummarizationMiddleware(
+    #             model=myllm,
+    #             max_tokens_before_summary=1024,  # Trigger summarization at 4000 tokens
+    #             messages_to_keep=5,  # Keep last 10 messages after summary
+    #             # summary_prompt="Custom prompt for summarization messagens",  # Optional
+    #         )
    
     
     client = MultiServerMCPClient(
@@ -122,8 +122,8 @@ async def main():
         
         ),
         checkpointer= InMemorySaver(),
-        # pre_model_hook=pre_model_hook,
-        middleware=[summarization_middleware]
+        pre_model_hook=pre_model_hook,
+        # middleware=[summarization_middleware]
     )
 
     id_session = uuid.uuid4()
@@ -141,7 +141,7 @@ async def main():
             if event["event"] == "on_chat_model_stream":
                 # delta token-a-token do modelo
                 #print(f'{event["metadata"]["langgraph_node"]}')
-                if event["metadata"]["langgraph_node"] != "SummarizationMiddleware.before_model":
+                # if event["metadata"]["langgraph_node"] != "SummarizationMiddleware.before_model":
                     print(event["data"]["chunk"].content or "", end="")
                 
             elif event["event"] == "on_tool_start":
