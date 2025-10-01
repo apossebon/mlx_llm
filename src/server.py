@@ -7,7 +7,8 @@ def main():
     port = 8000
 
     args_namespace = argparse.Namespace(
-        model="lmstudio-community/Qwen3-4B-Instruct-2507-MLX-4bit",
+        # model= "lmstudio-community/Qwen3-4B-Instruct-2507-MLX-4bit",
+        model = "lmstudio-community/Qwen3-30B-A3B-Instruct-2507-MLX-4bit",
         adapter_path=None,
         host=host,
         port=port,
@@ -17,11 +18,11 @@ def main():
         log_level="INFO",
         chat_template="",
         use_default_chat_template=False,
-        temp=0.1,
-        top_p=1.0,
-        top_k=0,
+        temp=0.7,
+        top_p=0.85,
+        top_k=40,
         min_p=0.0,
-        max_tokens=1024,
+        max_tokens=4098,
         chat_template_args={},
     )
 

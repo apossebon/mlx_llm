@@ -31,8 +31,8 @@ async def getDataHora():
             
     """
 
-    return datetime.now().strftime("%d/%m/%Y %H:%M:%S")
-
+    res =  datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+    return [{"result": res}]
 
 
 
@@ -68,9 +68,9 @@ async def main():
     # myllm = ChatMLX(max_tokens=4098, use_gpt_harmony_response_format=False)
     myllm.init()
 
-    llm_factory = LLMFactory()
+    # llm_factory = LLMFactory()
 
-    # myllm_summarization = llm_factory.get_LMStudio_llm("lmstudio-community/Qwen3-4B-Instruct-2507-MLX-4bit")
+    # myllm_summarization = llm_factory.get_LMStudio_llm("lmstudio-community/Qwen3-30B-A3B-Instruct-2507-MLX-4bit")
    
 
     # summarization_middleware = SummarizationMiddleware(
