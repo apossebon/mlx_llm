@@ -101,116 +101,296 @@ class MLXChat(BaseChatModel):
     # --------------------------------
     # Generate / AGenerate (métodos principais)
     # --------------------------------
-
     def _generate(
         self,
         messages: List[BaseMessage],
         stop: Optional[List[str]] = None,
         **kwargs: Any,
     ) -> ChatResult:
+        """Generate response from messages."""
         self._ensure_loaded()
-
-        # HARMONY → TOKENS p/ MLX
+        
+        # Tokenizar mensagens
+        tokens = self._tokenize_messages(messages)
+        
+        # Gerar resposta
+        resp_llm = self._call_model(tokens)
+        if isinstance(resp_llm, ChatResult):  # Erro retornado
+            return resp_llm
+        
+        # Aplicar stop words
+        resp_llm = self._apply_stop_words(resp_llm, stop)
+        
+        # Processar resposta baseado no formato
         if self.use_gpt_harmony_response_format:
-            tokens = self._render_harmony.render_harmony_conversation(messages, bound_tools=self.bound_tools)
+            return self._process_harmony_response(resp_llm, tokens)
+        else:
+            return self._process_standard_response(resp_llm, tokens)
+
+    def _call_model(self, tokens: List[int]) -> Union[str, ChatResult]:
+        """Call MLX model and handle errors."""
+        try:
+            return generate(
+                self._model,
+                self._tokenizer,
+                tokens,
+                max_tokens=self.max_tokens,
+                sampler=self._mlx_sampler,
+                logits_processors=self._mlx_logits_processors,
+                prompt_cache=self._mlx_prompt_cache if self.use_prompt_cache else None,
+                verbose=True
+            )
+        except Exception as e:
+            return ChatResult(generations=[
+                ChatGeneration(message=AIMessage(content=f"[generate error] {e}"))
+            ])
+
+    async def _agenerate(
+        self,
+        messages: List[BaseMessage],
+        stop: Optional[List[str]] = None,
+        run_manager: Optional[CallbackManagerForLLMRun] = None,
+        **kwargs: Any,
+    ) -> ChatResult:
+        """Generate response asynchronously from messages."""
+        self._ensure_loaded()
+        
+        # Tokenizar mensagens (pode ser feito de forma síncrona)
+        tokens = self._tokenize_messages(messages)
+        
+        # Gerar resposta de forma assíncrona
+        resp_llm = await self._acall_model(tokens)
+        if isinstance(resp_llm, ChatResult):  # Erro retornado
+            return resp_llm
+        
+        # Aplicar stop words
+        resp_llm = self._apply_stop_words(resp_llm, stop)
+        
+        # Processar resposta baseado no formato
+        if self.use_gpt_harmony_response_format:
+            return self._process_harmony_response(resp_llm, tokens)
+        else:
+            return self._process_standard_response(resp_llm, tokens)
+
+    async def _acall_model(self, tokens: List[int]) -> Union[str, ChatResult]:
+        """Call MLX model asynchronously and handle errors."""
+        try:
+            # Executar geração em thread pool para não bloquear o event loop
+            resp_llm = await asyncio.to_thread(
+                generate,
+                self._model,
+                self._tokenizer,
+                tokens,
+                max_tokens=self.max_tokens,
+                sampler=self._mlx_sampler,
+                logits_processors=self._mlx_logits_processors,
+                prompt_cache=self._mlx_prompt_cache if self.use_prompt_cache else None,
+                verbose=True
+            )
+            return resp_llm
+        except Exception as e:
+            return ChatResult(generations=[
+                ChatGeneration(message=AIMessage(content=f"[async generate error] {e}"))
+            ])
+
+    def _tokenize_messages(self, messages: List[BaseMessage]) -> List[int]:
+        """Convert messages to tokens."""
+        if self.use_gpt_harmony_response_format:
+            return self._render_harmony.render_harmony_conversation(messages, bound_tools=self.bound_tools)
         else:
             converted_messages = self._convert_messages(messages)
-            tokens = self._tokenizer.apply_chat_template(
+            return self._tokenizer.apply_chat_template(
                 converted_messages,
                 add_generation_prompt=True,
                 tools=self.bound_tools,
             )
 
-        try:
-            resp_llm = generate(
-                self._model,
-                self._tokenizer,
-                tokens,  
-                max_tokens=self.max_tokens,
-                sampler=self._mlx_sampler,
-                logits_processors=self._mlx_logits_processors,
-                prompt_cache=self._mlx_prompt_cache if self.use_prompt_cache else None,
-                
-            )
-        except Exception as e:
-            ai = AIMessage(content=f"[generate error] {e}")
-            return ChatResult(generations=[ChatGeneration(message=ai)])
+    
 
-        # stop manual (se o backend não suportar)
+    def _apply_stop_words(self, text: str, stop: Optional[List[str]]) -> str:
+        """Apply stop words to truncate response."""
         if stop:
             for s in stop:
-                i = resp_llm.find(s)
-                if i != -1:
-                    resp_llm = resp_llm[:i]
-                    break
+                idx = text.find(s)
+                if idx != -1:
+                    return text[:idx]
+        return text
 
-        if self.use_gpt_harmony_response_format:
+    def _calculate_tokens(self, input_tokens: int, output_text: str) -> Dict[str, int]:
+        """Calculate token usage statistics."""
+        try:
+            output_tokens = len(self._tokenizer.encode(output_text))
+        except Exception:
+            output_tokens = len(output_text)  # fallback
+        
+        return {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        }
 
-            thinking = self._render_harmony.detect_harmony_analysis_messages(resp_llm)
-            finals = self._render_harmony.detect_harmony_final_messages(resp_llm)
-            final_text = finals[-1] if finals else resp_llm
+    def _process_harmony_response(self, resp_llm: str, tokens: List[int]) -> ChatResult:
+        """Process response in Harmony format."""
+        # Detectar elementos Harmony
+        thinking = self._render_harmony.detect_harmony_analysis_messages(resp_llm)
+        finals = self._render_harmony.detect_harmony_final_messages(resp_llm)
+        final_text = finals[-1] if finals else resp_llm
+        
+        # Detectar tool calls
+        detected = self._render_harmony.detect_harmony_tool_calls(resp_llm)
+        tool_calls = self._render_harmony.to_lc_tool_calls(detected) if detected else []
+        
+        # Preparar conteúdo
+        content = "" if tool_calls else (final_text or "")
+        
+        # Criar mensagem AI
+        return self._create_chat_result(
+            content=content,
+            tool_calls=tool_calls,
+            usage=self._calculate_tokens(len(tokens), resp_llm),
+            metadata={"thinking": thinking} if thinking else {}
+        )
 
-            detected = self._render_harmony.detect_harmony_tool_calls(resp_llm)
-            tool_calls: List[ToolCall] = self._render_harmony.to_lc_tool_calls(detected) if detected else []
+    def _process_standard_response(self, resp_llm: str, tokens: List[int]) -> ChatResult:
+        """Process response in standard format."""
+        print(f"[DEBUG] resp_llm: {resp_llm}")
+        
+        # Detectar tool calls
+        tool_calls = self._detect_real_tool_calls(resp_llm)
+        content = "" if tool_calls else resp_llm
+        
+        # Criar mensagem AI
+        return self._create_chat_result(
+            content=content,
+            tool_calls=tool_calls,
+            usage=self._calculate_tokens(len(tokens), resp_llm)
+        )
 
-            content = "" if tool_calls else (final_text or "")
+    def _create_chat_result(
+        self, 
+        content: str, 
+        tool_calls: List[Dict], 
+        usage: Dict[str, int],
+        metadata: Optional[Dict] = None
+    ) -> ChatResult:
+        """Create unified ChatResult."""
+        ai_message = AIMessage(
+            content=content,
+            tool_calls=tool_calls,
+            usage_metadata=usage,
+            metadata=metadata or {},
+            response_metadata={"model_name": self.model_name},
+        )
+        return ChatResult(generations=[ChatGeneration(message=ai_message)])
+    # def _generate(
+    #     self,
+    #     messages: List[BaseMessage],
+    #     stop: Optional[List[str]] = None,
+    #     **kwargs: Any,
+    # ) -> ChatResult:
+    #     self._ensure_loaded()
 
-            input_tokens = len(tokens)  # prompt já está em tokens Harmony
-            # conte tokens de saída com o tokenizer do MLX
-            try:
-                output_tokens = len(self._tokenizer.encode(resp_llm))
-            except Exception:
-                # fallback (menos preciso) se o tokenizer não expuser encode
-                output_tokens = len(resp_llm)
+    #     # HARMONY → TOKENS p/ MLX
+    #     if self.use_gpt_harmony_response_format:
+    #         tokens = self._render_harmony.render_harmony_conversation(messages, bound_tools=self.bound_tools)
+    #     else:
+    #         converted_messages = self._convert_messages(messages)
+    #         tokens = self._tokenizer.apply_chat_template(
+    #             converted_messages,
+    #             add_generation_prompt=True,
+    #             tools=self.bound_tools,
+    #         )
 
-            total_tokens = input_tokens + output_tokens
+    #     try:
+    #         resp_llm = generate(
+    #             self._model,
+    #             self._tokenizer,
+    #             tokens,  
+    #             max_tokens=self.max_tokens,
+    #             sampler=self._mlx_sampler,
+    #             logits_processors=self._mlx_logits_processors,
+    #             prompt_cache=self._mlx_prompt_cache if self.use_prompt_cache else None,
+                
+    #         )
+    #     except Exception as e:
+    #         ai = AIMessage(content=f"[generate error] {e}")
+    #         return ChatResult(generations=[ChatGeneration(message=ai)])
 
-            ai = AIMessage(
-                content=content,
-                tool_calls=tool_calls,
-                usage_metadata={
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "total_tokens": total_tokens,     
-                },
-                # if thinking, add to metadata
-                metadata={"thinking": thinking} if thinking else {},
-                response_metadata={"model_name": self.model_name},
-            )
-            return ChatResult(generations=[ChatGeneration(message=ai)])
-        else:
-            print(f"[DEBUG] resp_llm: {resp_llm}")
-            detected_tool_calls = self._detect_real_tool_calls(resp_llm)
-            if detected_tool_calls:
-                resp = {"content": "", "tool_calls": detected_tool_calls}
-            else:
-                resp = {"content": resp_llm, "tool_calls": []}
+    #     # stop manual (se o backend não suportar)
+    #     if stop:
+    #         for s in stop:
+    #             i = resp_llm.find(s)
+    #             if i != -1:
+    #                 resp_llm = resp_llm[:i]
+    #                 break
 
-            content = resp.get("content", "Default response from custom LLM")
-            tool_calls = resp.get("tool_calls", [])
-            input_tokens = len(tokens)  # prompt já está em tokens Harmony
-            # conte tokens de saída com o tokenizer do MLX
-            try:
-                output_tokens = len(self._tokenizer.encode(resp_llm))
-            except Exception:
-                # fallback (menos preciso) se o tokenizer não expuser encode
-                output_tokens = len(resp_llm)
+    #     if self.use_gpt_harmony_response_format:
 
-            total_tokens = input_tokens + output_tokens
+    #         thinking = self._render_harmony.detect_harmony_analysis_messages(resp_llm)
+    #         finals = self._render_harmony.detect_harmony_final_messages(resp_llm)
+    #         final_text = finals[-1] if finals else resp_llm
 
-            ai = AIMessage(
-                content=content,
-                tool_calls=tool_calls,
-                usage_metadata={
-                    "input_tokens": input_tokens,
-                    "output_tokens": output_tokens,
-                    "total_tokens": total_tokens,     
-                },
-                # if thinking, add to metadata
-                # metadata={"thinking": None},
-                response_metadata={"model_name": self.model_name},
-            )
-            return ChatResult(generations=[ChatGeneration(message=ai)])
+    #         detected = self._render_harmony.detect_harmony_tool_calls(resp_llm)
+    #         tool_calls: List[ToolCall] = self._render_harmony.to_lc_tool_calls(detected) if detected else []
+
+    #         content = "" if tool_calls else (final_text or "")
+
+    #         input_tokens = len(tokens)  # prompt já está em tokens Harmony
+    #         # conte tokens de saída com o tokenizer do MLX
+    #         try:
+    #             output_tokens = len(self._tokenizer.encode(resp_llm))
+    #         except Exception:
+    #             # fallback (menos preciso) se o tokenizer não expuser encode
+    #             output_tokens = len(resp_llm)
+
+    #         total_tokens = input_tokens + output_tokens
+
+    #         ai = AIMessage(
+    #             content=content,
+    #             tool_calls=tool_calls,
+    #             usage_metadata={
+    #                 "input_tokens": input_tokens,
+    #                 "output_tokens": output_tokens,
+    #                 "total_tokens": total_tokens,     
+    #             },
+    #             # if thinking, add to metadata
+    #             metadata={"thinking": thinking} if thinking else {},
+    #             response_metadata={"model_name": self.model_name},
+    #         )
+    #         return ChatResult(generations=[ChatGeneration(message=ai)])
+    #     else:
+    #         print(f"[DEBUG] resp_llm: {resp_llm}")
+    #         detected_tool_calls = self._detect_real_tool_calls(resp_llm)
+    #         if detected_tool_calls:
+    #             resp = {"content": "", "tool_calls": detected_tool_calls}
+    #         else:
+    #             resp = {"content": resp_llm, "tool_calls": []}
+
+    #         content = resp.get("content", "Default response from custom LLM")
+    #         tool_calls = resp.get("tool_calls", [])
+    #         input_tokens = len(tokens)  # prompt já está em tokens Harmony
+    #         # conte tokens de saída com o tokenizer do MLX
+    #         try:
+    #             output_tokens = len(self._tokenizer.encode(resp_llm))
+    #         except Exception:
+    #             # fallback (menos preciso) se o tokenizer não expuser encode
+    #             output_tokens = len(resp_llm)
+
+    #         total_tokens = input_tokens + output_tokens
+
+    #         ai = AIMessage(
+    #             content=content,
+    #             tool_calls=tool_calls,
+    #             usage_metadata={
+    #                 "input_tokens": input_tokens,
+    #                 "output_tokens": output_tokens,
+    #                 "total_tokens": total_tokens,     
+    #             },
+    #             # if thinking, add to metadata
+    #             # metadata={"thinking": None},
+    #             response_metadata={"model_name": self.model_name},
+    #         )
+            # return ChatResult(generations=[ChatGeneration(message=ai)])
     # -----------------------------
     # Métodos auxiliares privados - detecção de tool calls tradicionais
     # -----------------------------
